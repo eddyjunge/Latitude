@@ -1,0 +1,41 @@
+# Gradle
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# Local machine config (contains SDK path)
+local.properties
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+secrets.properties
+keystore.properties
+*.keystore
+*.jks
+google-services.json
+*.pem
+*.p12
+
+# Build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+output-metadata.json
+
+# Logs / OS
+*.log
+.DS_Store
+Thumbs.db
