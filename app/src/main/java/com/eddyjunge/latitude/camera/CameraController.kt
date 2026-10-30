@@ -5,11 +5,15 @@ import android.content.Context
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.DynamicRangeProfiles
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
+import android.media.MediaCodecInfo.CodecProfileLevel
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
@@ -31,6 +35,9 @@ private const val TAG = "CameraController"
 
 /** Ignore a second trigger within this window so one press never starts and stops at once. */
 private const val TOGGLE_DEBOUNCE_MS = 600L
+
+/** High tier is needed above 40 Mbit/s; fall back to Main tier if the encoder refuses it. */
+private val HEVC_10BIT_LEVELS = listOf(CodecProfileLevel.HEVCHighTierLevel51, CodecProfileLevel.HEVCMainTierLevel51)
 
 sealed interface CameraState {
     data object Idle : CameraState
@@ -58,6 +65,14 @@ class CameraController(context: Context) {
     private val _state = MutableStateFlow<CameraState>(CameraState.Idle)
     val state: StateFlow<CameraState> = _state.asStateFlow()
 
+    /** Exposure, white balance and focus held by the user; always held while recording. */
+    private val _locked = MutableStateFlow(false)
+    val locked: StateFlow<Boolean> = _locked.asStateFlow()
+
+    /** Live exposure readout, e.g. "ISO 100 · 1/50". */
+    private val _exposure = MutableStateFlow("")
+    val exposure: StateFlow<String> = _exposure.asStateFlow()
+
     /** Display rotation in degrees; read when a recording starts. */
     @Volatile
     var displayRotation: () -> Int = { 90 }
@@ -76,6 +91,10 @@ class CameraController(context: Context) {
     private var previewSurface: Surface? = null
     private var recorderSurface: Surface? = null
     private var tenBitAllowed = true
+    private var hevcLevel: Int? = null
+    private var lastFocusDistance: Float? = null
+    private var lastExposureUpdate = 0L
+    private var startupLogged = false
     private var recording: ActiveRecording? = null
     private var lastToggleAt = 0L
 
@@ -140,6 +159,15 @@ class CameraController(context: Context) {
         }
     }
 
+    /** "Measure once, then lock": freezes the current auto values before framing a shot. */
+    fun toggleLock() {
+        handler.post {
+            if (recording != null) return@post
+            _locked.value = !_locked.value
+            previewSurface?.let { runCatching { setRepeating(listOf(it), _locked.value) } }
+        }
+    }
+
     @SuppressLint("MissingPermission") // the activity only calls open() once permissions are granted
     private fun openInternal() {
         if (device != null || opening) return
@@ -199,30 +227,36 @@ class CameraController(context: Context) {
      */
     private fun ensureRecorderSurface(): Surface? {
         recorderSurface?.let { return it }
+        val candidates = if (tenBit) HEVC_10BIT_LEVELS else listOf(null)
         val warmup = File(appContext.cacheDir, "warmup.mp4")
-        val surface = MediaCodec.createPersistentInputSurface()
-        try {
-            buildRecorder(appContext, surface, config, tenBit, 0, null, warmup).apply {
-                try {
-                    prepare()
-                } finally {
-                    release()
+        for (level in candidates) {
+            val surface = MediaCodec.createPersistentInputSurface()
+            try {
+                buildRecorder(appContext, surface, config, level, 0, null, warmup).apply {
+                    try {
+                        prepare()
+                    } finally {
+                        release()
+                    }
                 }
+                hevcLevel = level
+                recorderSurface = surface
+                Log.i(TAG, "encoder ready: level=$level bitrate=${config.bitrate}")
+                return surface
+            } catch (e: Exception) {
+                surface.release()
+                Log.w(TAG, "encoder rejected level=$level", e)
+            } finally {
+                warmup.delete()
             }
-        } catch (e: Exception) {
-            surface.release()
-            if (tenBit) {
-                Log.w(TAG, "10-bit HEVC encoder unavailable, falling back to 8-bit", e)
-                tenBitAllowed = false
-                return ensureRecorderSurface()
-            }
-            fail("Encoder lässt sich nicht starten", e)
-            return null
-        } finally {
-            warmup.delete()
         }
-        recorderSurface = surface
-        return surface
+        if (tenBit) {
+            Log.w(TAG, "10-bit HEVC encoder unavailable, falling back to 8-bit")
+            tenBitAllowed = false
+            return ensureRecorderSurface()
+        }
+        fail("Encoder lässt sich nicht starten")
+        return null
     }
 
     private fun createSessionIfReady() {
@@ -244,8 +278,9 @@ class CameraController(context: Context) {
                 }
                 session = s
                 try {
-                    setRepeating(listOf(preview))
+                    setRepeating(listOf(preview), _locked.value)
                     _state.value = CameraState.Ready(formatLabel)
+                    logStartupTime()
                 } catch (e: Exception) {
                     fail("Vorschau lässt sich nicht starten", e)
                 }
@@ -282,15 +317,56 @@ class CameraController(context: Context) {
         session = null
     }
 
-    /** TEMPLATE_RECORD for preview too, so exposure does not jump when recording starts. */
-    private fun setRepeating(targets: List<Surface>) {
+    /**
+     * TEMPLATE_RECORD for preview too, so nothing jumps when recording starts.
+     * With [lock], auto exposure and white balance hold their current values and focus is
+     * pinned to the last measured distance: nothing may change mid-clip.
+     */
+    private fun setRepeating(targets: List<Surface>, lock: Boolean) {
         val s = session ?: return
         val dev = device ?: return
         val request = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             targets.forEach(::addTarget)
             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(config.fps, config.fps))
+            set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+            if (config.opticalStabilization) {
+                set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            }
+            config.noiseReductionMode?.let { set(CaptureRequest.NOISE_REDUCTION_MODE, it) }
+            config.edgeMode?.let { set(CaptureRequest.EDGE_MODE, it) }
+            set(CaptureRequest.CONTROL_AE_LOCK, lock)
+            set(CaptureRequest.CONTROL_AWB_LOCK, lock)
+            val focus = lastFocusDistance
+            if (lock && config.manualFocus && focus != null) {
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+                set(CaptureRequest.LENS_FOCUS_DISTANCE, focus)
+            } else {
+                set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            }
         }.build()
-        s.setRepeatingRequest(request, null, handler)
+        s.setRepeatingRequest(request, captureCallback, handler)
+    }
+
+    private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            // While locked, keep the distance focus was pinned to rather than the lens readout.
+            if (request[CaptureRequest.CONTROL_AF_MODE] != CameraMetadata.CONTROL_AF_MODE_OFF) {
+                lastFocusDistance = result[CaptureResult.LENS_FOCUS_DISTANCE]
+            }
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastExposureUpdate < 250) return
+            lastExposureUpdate = now
+            val iso = result[CaptureResult.SENSOR_SENSITIVITY] ?: return
+            val exposureNs = result[CaptureResult.SENSOR_EXPOSURE_TIME] ?: return
+            _exposure.value = "ISO $iso · 1/${Math.round(1e9 / exposureNs)}"
+        }
+    }
+
+    /** Time from process start to a live, record-ready preview (adb logcat -s CameraController). */
+    private fun logStartupTime() {
+        if (startupLogged) return
+        startupLogged = true
+        Log.i(TAG, "record-ready ${SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime()} ms after process start")
     }
 
     private fun startRecording() {
@@ -308,11 +384,11 @@ class CameraController(context: Context) {
         val hint = (config.sensorOrientation - displayRotation() + 360) % 360
         var recorder: MediaRecorder? = null
         try {
-            recorder = buildRecorder(appContext, encoder, config, tenBit, hint, output.fd.fileDescriptor)
+            recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, output.fd.fileDescriptor)
             recorder.prepare()
             recorder.start()
             // Feed the encoder only once it runs, otherwise the camera can stall on full buffers.
-            setRepeating(listOf(preview, encoder))
+            setRepeating(listOf(preview, encoder), lock = true)
         } catch (e: Exception) {
             recorder?.release()
             output.discard()
@@ -327,7 +403,7 @@ class CameraController(context: Context) {
         val active = recording ?: return
         recording = null
         // Stop feeding the encoder first, then finalize the file.
-        previewSurface?.let { preview -> runCatching { setRepeating(listOf(preview)) } }
+        previewSurface?.let { preview -> runCatching { setRepeating(listOf(preview), _locked.value) } }
         val stopped = runCatching { active.recorder.stop() }
             .onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }
             .isSuccess

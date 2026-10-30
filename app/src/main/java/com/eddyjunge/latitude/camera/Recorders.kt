@@ -9,13 +9,13 @@ import java.io.FileDescriptor
 
 /**
  * Builds a MediaRecorder that encodes from the persistent [surface].
- * HEVC, 10-bit Main10 when [tenBit], AAC 48 kHz stereo.
+ * HEVC Main10 at [hevcLevel] for 10-bit, or 8-bit Main when [hevcLevel] is null; AAC 48 kHz stereo.
  */
 fun buildRecorder(
     context: Context,
     surface: Surface,
     config: VideoConfig,
-    tenBit: Boolean,
+    hevcLevel: Int?,
     orientationHint: Int,
     output: FileDescriptor?,
     warmupFile: File? = null,
@@ -29,14 +29,12 @@ fun buildRecorder(
     setVideoFrameRate(config.fps)
     setVideoSize(config.videoSize.width, config.videoSize.height)
     setVideoEncoder(MediaRecorder.VideoEncoder.HEVC)
-    if (tenBit) {
-        setVideoEncodingProfileLevel(CodecProfileLevel.HEVCProfileMain10, CodecProfileLevel.HEVCMainTierLevel51)
-    }
+    if (hevcLevel != null) setVideoEncodingProfileLevel(CodecProfileLevel.HEVCProfileMain10, hevcLevel)
     if (withAudio) {
         setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
         setAudioSamplingRate(48_000)
         setAudioChannels(2)
-        setAudioEncodingBitRate(256_000)
+        setAudioEncodingBitRate(320_000)
     }
     setInputSurface(surface)
     setOrientationHint(orientationHint)

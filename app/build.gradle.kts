@@ -21,6 +21,8 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            // Local device testing only. A real release key must never be committed (.gitignore).
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

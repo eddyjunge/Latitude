@@ -22,13 +22,20 @@ data class VideoConfig(
     val bitrate: Int,
     /** True if the camera can deliver 10-bit HLG; may still be dropped if the session rejects it. */
     val hlgSupported: Boolean,
+    /** Least processing the ISP offers; null keeps the template default. */
+    val noiseReductionMode: Int?,
+    val edgeMode: Int?,
+    val opticalStabilization: Boolean,
+    /** AF can be switched off and focus held at a fixed distance. */
+    val manualFocus: Boolean,
 ) {
     val label: String
         get() = "${if (videoSize.width >= 3840) "4K" else "${videoSize.height}p"} · $fps"
 
     companion object {
-        private const val TARGET_FPS = 30
-        private const val BITRATE_4K = 100_000_000
+        /** 25p first: matches 50 Hz mains lighting in Europe. */
+        private val PREFERRED_FPS = listOf(25, 30)
+        private const val BITRATE_4K = 120_000_000
         private val MAX_VIDEO = Size(3840, 2160)
         private val MAX_PREVIEW = Size(1920, 1080)
 
@@ -45,11 +52,17 @@ data class VideoConfig(
             val previewSize = largest16by9(map.getOutputSizes(SurfaceHolder::class.java), MAX_PREVIEW)
 
             val fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES).orEmpty()
-            val fps = if (fpsRanges.any { it.lower == TARGET_FPS && it.upper == TARGET_FPS }) TARGET_FPS
-            else fpsRanges.filter { it.lower == it.upper }.maxOf { it.upper }
+            val fixed = fpsRanges.filter { it.lower == it.upper }.map { it.upper }
+            val fps = PREFERRED_FPS.firstOrNull { it in fixed } ?: fixed.max()
 
             val hlg = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES)
                 ?.supportedProfiles?.contains(DynamicRangeProfiles.HLG10) == true
+
+            val nrModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toList().orEmpty()
+            val edgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toList().orEmpty()
+            val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty()
+            val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList().orEmpty()
+            val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
 
             logCapabilities(cameraId, chars, fpsRanges)
 
@@ -64,6 +77,13 @@ data class VideoConfig(
                 fps = fps,
                 bitrate = bitrate,
                 hlgSupported = hlg,
+                noiseReductionMode = listOf(
+                    CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL,
+                    CameraMetadata.NOISE_REDUCTION_MODE_FAST,
+                ).firstOrNull { it in nrModes },
+                edgeMode = CameraMetadata.EDGE_MODE_OFF.takeIf { it in edgeModes },
+                opticalStabilization = CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON in oisModes,
+                manualFocus = CameraMetadata.CONTROL_AF_MODE_OFF in afModes && minFocus > 0f,
             )
         }
 

@@ -39,3 +39,6 @@ output-metadata.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Test footage and probe dumps pulled from the phone (large, personal)
+testclips/

@@ -73,10 +73,13 @@ fun CameraScreen(
         }
 
         val state by camera.state.collectAsState()
+        val locked by camera.locked.collectAsState()
+        val exposure by camera.exposure.collectAsState()
+        val recording = state is CameraState.Recording
 
         CameraPreview(camera, Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(16f / 9f))
 
-        StatusBar(state, thermalStatus, Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+        StatusBar(state, exposure, thermalStatus, Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
 
         // Development entry point for the stage-0 capability probe; hidden while recording.
         if (state !is CameraState.Recording) {
@@ -88,10 +91,17 @@ fun CameraScreen(
         }
 
         RecordButton(
-            recording = state is CameraState.Recording,
-            enabled = state is CameraState.Ready || state is CameraState.Recording,
+            recording = recording,
+            enabled = state is CameraState.Ready || recording,
             onClick = camera::toggleRecording,
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 28.dp),
+        )
+
+        LockButton(
+            locked = locked || recording,
+            enabled = state is CameraState.Ready,
+            onClick = camera::toggleLock,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 32.dp),
         )
 
         (state as? CameraState.Error)?.let {
@@ -131,7 +141,7 @@ private fun CameraPreview(camera: CameraController, modifier: Modifier) {
 }
 
 @Composable
-private fun StatusBar(state: CameraState, thermalStatus: Int, modifier: Modifier) {
+private fun StatusBar(state: CameraState, exposure: String, thermalStatus: Int, modifier: Modifier) {
     Row(
         modifier = modifier
             .background(Color(0x66000000), RoundedCornerShape(50))
@@ -147,6 +157,9 @@ private fun StatusBar(state: CameraState, thermalStatus: Int, modifier: Modifier
             }
             is CameraState.Ready -> BasicText(state.format, style = LabelStyle)
             else -> BasicText("…", style = LabelStyle)
+        }
+        if (exposure.isNotEmpty() && (state is CameraState.Ready || state is CameraState.Recording)) {
+            BasicText(exposure, style = LabelStyle)
         }
         thermalLabel(thermalStatus)?.let { (text, color) ->
             Spacer(Modifier.width(4.dp))
@@ -193,4 +206,18 @@ private fun RecordButton(recording: Boolean, enabled: Boolean, onClick: () -> Un
     ) {
         Box(Modifier.size(innerSize).background(RecordRed, RoundedCornerShape(corner)))
     }
+}
+
+/** AE, AWB and AF held. Yellow like a camera's lock indicator; always on while recording. */
+@Composable
+private fun LockButton(locked: Boolean, enabled: Boolean, onClick: () -> Unit, modifier: Modifier) {
+    val color = if (locked) Color(0xFFFFD60A) else Secondary
+    BasicText(
+        text = "AE · AWB · AF LOCK",
+        style = LabelStyle.copy(color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
+        modifier = modifier
+            .border(1.dp, color, RoundedCornerShape(50))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    )
 }
