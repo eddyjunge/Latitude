@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.eddyjunge.rebuildcamera"
+    namespace = "com.eddyjunge.latitude"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.eddyjunge.rebuildcamera"
+        applicationId = "com.eddyjunge.latitude"
         // Android 14+; the Xiaomi 15 Ultra ships with Android 15
         minSdk = 34
         targetSdk = 36

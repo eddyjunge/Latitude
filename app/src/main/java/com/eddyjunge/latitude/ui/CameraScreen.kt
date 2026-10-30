@@ -1,4 +1,4 @@
-package com.eddyjunge.rebuildcamera.ui
+package com.eddyjunge.latitude.ui
 
 import android.os.PowerManager
 import android.os.SystemClock
@@ -38,8 +38,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.eddyjunge.rebuildcamera.camera.CameraController
-import com.eddyjunge.rebuildcamera.camera.CameraState
+import com.eddyjunge.latitude.camera.CameraController
+import com.eddyjunge.latitude.camera.CameraState
 import kotlinx.coroutines.delay
 
 private val RecordRed = Color(0xFFFF3B30)
@@ -60,6 +60,7 @@ fun CameraScreen(
     hasPermissions: Boolean,
     thermalStatus: Int,
     onRequestPermissions: () -> Unit,
+    onOpenProbe: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (!hasPermissions) {
@@ -76,6 +77,15 @@ fun CameraScreen(
         CameraPreview(camera, Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(16f / 9f))
 
         StatusBar(state, thermalStatus, Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
+
+        // Development entry point for the stage-0 capability probe; hidden while recording.
+        if (state !is CameraState.Recording) {
+            BasicText(
+                text = "PROBE",
+                style = LabelStyle,
+                modifier = Modifier.align(Alignment.TopStart).clickable(onClick = onOpenProbe).padding(20.dp),
+            )
+        }
 
         RecordButton(
             recording = state is CameraState.Recording,

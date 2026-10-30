@@ -1,4 +1,4 @@
-package com.eddyjunge.rebuildcamera.camera
+package com.eddyjunge.latitude.camera
 
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager

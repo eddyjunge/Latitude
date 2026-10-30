@@ -11,7 +11,7 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@style/Theme.RebuildCamera">
+        android:theme="@style/Theme.Latitude">
 
         <!-- configChanges: the activity must never be recreated mid-recording -->
         <activity
@@ -25,5 +25,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".probe.ProbeActivity"
+            android:exported="false"
+            android:label="Capability Probe" />
     </application>
 </manifest>

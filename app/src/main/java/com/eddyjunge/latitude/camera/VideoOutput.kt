@@ -1,4 +1,4 @@
-package com.eddyjunge.rebuildcamera.camera
+package com.eddyjunge.latitude.camera
 
 import android.content.ContentValues
 import android.content.Context
@@ -9,7 +9,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** A pending video file in Movies/RebuildCamera; invisible to other apps until [publish]. */
+/** A pending video file in Movies/Latitude; invisible to other apps until [publish]. */
 class VideoOutput private constructor(
     private val context: Context,
     private val uri: Uri,
@@ -28,11 +28,11 @@ class VideoOutput private constructor(
 
     companion object {
         fun create(context: Context): VideoOutput {
-            val name = "RC_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+            val name = "LAT_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/RebuildCamera")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Latitude")
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val resolver = context.contentResolver

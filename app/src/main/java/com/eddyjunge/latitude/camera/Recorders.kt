@@ -1,4 +1,4 @@
-package com.eddyjunge.rebuildcamera.camera
+package com.eddyjunge.latitude.camera
 
 import android.content.Context
 import android.media.MediaCodecInfo.CodecProfileLevel

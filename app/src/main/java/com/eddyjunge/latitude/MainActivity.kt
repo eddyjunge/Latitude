@@ -1,6 +1,7 @@
-package com.eddyjunge.rebuildcamera
+package com.eddyjunge.latitude
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.PowerManager
@@ -17,8 +18,9 @@ import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.eddyjunge.rebuildcamera.camera.CameraController
-import com.eddyjunge.rebuildcamera.ui.CameraScreen
+import com.eddyjunge.latitude.camera.CameraController
+import com.eddyjunge.latitude.probe.ProbeActivity
+import com.eddyjunge.latitude.ui.CameraScreen
 
 private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
 
@@ -57,6 +59,7 @@ class MainActivity : ComponentActivity() {
                 hasPermissions = hasPermissions,
                 thermalStatus = thermalStatus,
                 onRequestPermissions = { permissionLauncher.launch(REQUIRED_PERMISSIONS) },
+                onOpenProbe = { startActivity(Intent(this, ProbeActivity::class.java)) },
             )
         }
         if (!hasPermissions) permissionLauncher.launch(REQUIRED_PERMISSIONS)

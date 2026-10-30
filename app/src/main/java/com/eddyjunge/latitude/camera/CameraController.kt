@@ -1,4 +1,4 @@
-package com.eddyjunge.rebuildcamera.camera
+package com.eddyjunge.latitude.camera
 
 import android.annotation.SuppressLint
 import android.content.Context
