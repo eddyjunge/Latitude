@@ -12,7 +12,7 @@ export JAVA_HOME="${JAVA_HOME:-$HOME/Android/jdk-21}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 ADB="$ANDROID_HOME/platform-tools/adb"
 PKG=com.eddyjunge.latitude
-TAGS=(CameraController VideoConfig AndroidRuntime)
+TAGS=(CameraController VideoConfig AudioMeter AndroidRuntime)
 
 need_device() {
     if [ "$("$ADB" get-state 2>/dev/null || true)" = "device" ]; then return; fi

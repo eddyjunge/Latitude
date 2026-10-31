@@ -43,7 +43,7 @@ class AudioChoice(val audioSource: Int, val device: AudioDeviceInfo?, val channe
  * Bluetooth mics only deliver audio while they are the "communication device", which also
  * opens the SCO link; that takes about a second, so it is done as soon as the user picks it.
  */
-class AudioInput(context: Context, private val handler: Handler) {
+class AudioInput(context: Context, private val handler: Handler, private val onChange: () -> Unit) {
     private val audioManager = context.getSystemService(AudioManager::class.java)
 
     private val _available = MutableStateFlow(listOf(MicSource.INTERNAL, MicSource.OFF))
@@ -73,6 +73,7 @@ class AudioInput(context: Context, private val handler: Handler) {
             if (bluetoothDevice() != null) add(MicSource.BLUETOOTH)
             add(MicSource.OFF)
         }
+        onChange()
         Log.i(TAG, "inputs: " + inputs.joinToString { "${it.type}:${it.productName}:${it.address}" })
     }
 

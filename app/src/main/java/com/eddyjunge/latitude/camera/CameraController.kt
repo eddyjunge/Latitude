@@ -76,7 +76,11 @@ class CameraController(context: Context) {
     private val _lenses = MutableStateFlow<List<Lens>>(emptyList())
     val lenses: StateFlow<List<Lens>> = _lenses.asStateFlow()
 
-    val audioInput = AudioInput(appContext, handler)
+    val audioInput = AudioInput(appContext, handler) { handler.post { updateMeter() } }
+
+    private val meter = AudioMeter()
+    /** Live mic level per channel; null while the mic is off or the camera is closed. */
+    val audioLevels: StateFlow<List<ChannelLevel>?> = meter.levels
 
     /** Active format; null until resolved. The preview surface must match its preview size. */
     private val _config = MutableStateFlow<VideoConfig?>(null)
@@ -150,6 +154,7 @@ class CameraController(context: Context) {
             _settings.value = next
             next.save(appContext)
             audioInput.route(next.mic, active = wantOpen)
+            updateMeter()
             if (next.sameCamera(prev)) return@post
 
             closeSession()
@@ -185,6 +190,7 @@ class CameraController(context: Context) {
             wantOpen = false
             closeInternal()
             audioInput.route(_settings.value.mic, active = false)
+            updateMeter()
         }
     }
 
@@ -192,6 +198,7 @@ class CameraController(context: Context) {
         handler.post {
             wantOpen = false
             closeInternal()
+            meter.stop()
             audioInput.release()
             recorderSurface?.release()
             recorderSurface = null
@@ -359,6 +366,8 @@ class CameraController(context: Context) {
                     setRepeating()
                     _state.value = CameraState.Ready(formatLabel)
                     logStartupTime()
+                    // Only now: opening the mic next to the camera HAL costs startup time.
+                    updateMeter()
                 } catch (e: Exception) {
                     fail("Vorschau lässt sich nicht starten", e)
                 }
@@ -492,9 +501,25 @@ class CameraController(context: Context) {
         var recorder: MediaRecorder? = null
         try {
             val audio = audioInput.choose(_settings.value.mic, _settings.value.micProcessing)
+            // HyperOS hands an UNPROCESSED input to one client only and silences the rest.
+            val exclusive = audio?.audioSource == MediaRecorder.AudioSource.UNPROCESSED
+            if (exclusive) meter.stop(join = true)
             recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, audio, output.fd.fileDescriptor)
-            recorder.prepare()
-            recorder.start()
+            try {
+                recorder.prepare()
+                recorder.start()
+            } catch (e: Exception) {
+                // A phone that can't share the mic with the meter still has to record: the take wins.
+                if (audio == null || !meter.running) throw e
+                Log.w(TAG, "recorder failed next to the level meter, retrying without it", e)
+                recorder.release()
+                recorder = null
+                meter.stop(join = true)
+                recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, audio, output.fd.fileDescriptor)
+                recorder.prepare()
+                recorder.start()
+            }
+            if (audio != null && !meter.running) meter.follow(recorder, audio.channels, handler)
             // Feed the encoder only once it runs, otherwise the camera can stall on full buffers.
             startingRecording = true
             try {
@@ -503,9 +528,11 @@ class CameraController(context: Context) {
                 startingRecording = false
             }
         } catch (e: Exception) {
+            if (meter.following) meter.stop()
             recorder?.release()
             output.discard()
             fail("Aufnahme konnte nicht gestartet werden", e)
+            updateMeter()
             return
         }
         recording = ActiveRecording(recorder, output)
@@ -517,12 +544,24 @@ class CameraController(context: Context) {
         recording = null
         // Stop feeding the encoder first, then finalize the file.
         runCatching { setRepeating() }
+        if (meter.following) meter.stop()
         val stopped = runCatching { active.recorder.stop() }
             .onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }
             .isSuccess
         active.recorder.release()
         if (stopped) active.output.publish() else active.output.discard()
         _state.value = if (session != null) CameraState.Ready(formatLabel) else CameraState.Opening
+        updateMeter()
+    }
+
+    /**
+     * Camera thread. Meters the mic the next recording will use while the camera is open.
+     * Left alone during a take so the recording's input is never touched.
+     */
+    private fun updateMeter() {
+        if (recording != null) return
+        val s = _settings.value
+        meter.meter(if (wantOpen) audioInput.choose(s.mic, s.micProcessing) else null)
     }
 
     private fun fail(message: String, cause: Throwable? = null) {

@@ -6,6 +6,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,6 +29,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
@@ -35,6 +38,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -43,8 +49,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.eddyjunge.latitude.camera.CameraController
 import com.eddyjunge.latitude.camera.CameraState
+import com.eddyjunge.latitude.camera.ChannelLevel
 import com.eddyjunge.latitude.camera.FrameFormat
 import com.eddyjunge.latitude.camera.Lens
+import com.eddyjunge.latitude.camera.METER_FLOOR_DB
 import com.eddyjunge.latitude.camera.MicProcessing
 import com.eddyjunge.latitude.camera.MicSource
 import com.eddyjunge.latitude.camera.Stabilization
@@ -115,6 +123,8 @@ fun CameraScreen(
                 modifier = Modifier.align(Alignment.TopEnd).clickable(onClick = onOpenGallery).padding(20.dp),
             )
         }
+
+        LevelMeter(camera, Modifier.align(Alignment.TopEnd).padding(top = 68.dp, end = 26.dp))
 
         LensPicker(
             lenses = lenses,
@@ -282,6 +292,51 @@ private fun RecordButton(recording: Boolean, enabled: Boolean, onClick: () -> Un
 }
 
 private val LockYellow = Color(0xFFFFD60A)
+
+/** Loud enough to watch: the last 6 dB before the track overloads. */
+private const val METER_HOT_DB = -6f
+
+private fun meterColor(db: Float, clipped: Boolean, base: Color): Color = when {
+    clipped -> RecordRed
+    db >= METER_HOT_DB -> LockYellow
+    else -> base
+}
+
+/**
+ * Peak meter without a scale: one thin bar per recorded channel, 0 dBFS at the top and
+ * -60 at the bottom. White is fine, yellow is close to the top, red means it clipped.
+ */
+@Composable
+private fun LevelMeter(camera: CameraController, modifier: Modifier) {
+    val levels = camera.audioLevels.collectAsState()
+    // Only the channel count recomposes; the 30 updates per second only redraw.
+    val channels by remember { derivedStateOf { levels.value?.size ?: 0 } }
+    if (channels == 0) return
+    Canvas(modifier.width((4 * channels + 3 * (channels - 1)).dp).height(56.dp)) {
+        val current = levels.value ?: return@Canvas
+        val barWidth = 4.dp.toPx()
+        val step = barWidth + 3.dp.toPx()
+        val radius = CornerRadius(barWidth / 2)
+        fun heightOf(db: Float) = size.height * ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).coerceIn(0f, 1f)
+        current.forEachIndexed { i, ch: ChannelLevel ->
+            val x = i * step
+            drawRoundRect(Color(0x33FFFFFF), Offset(x, 0f), Size(barWidth, size.height), radius)
+            val h = heightOf(ch.level)
+            if (h > 0f) {
+                drawRoundRect(
+                    meterColor(ch.level, ch.clipped, Color(0xCCFFFFFF)),
+                    Offset(x, size.height - h),
+                    Size(barWidth, h),
+                    radius,
+                )
+            }
+            if (ch.hold > ch.level + 1f) {
+                val y = size.height - heightOf(ch.hold)
+                drawRect(meterColor(ch.hold, ch.clipped, Secondary), Offset(x, y), Size(barWidth, 1.5.dp.toPx()))
+            }
+        }
+    }
+}
 
 /** One frozen auto value. Yellow like a camera's lock indicator. */
 @Composable
