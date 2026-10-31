@@ -13,6 +13,7 @@ import java.util.Locale
 class VideoOutput private constructor(
     private val context: Context,
     private val uri: Uri,
+    /** Read-write: [FullRange] patches the finished file in place. */
     val fd: ParcelFileDescriptor,
 ) {
     fun publish() {
@@ -48,7 +49,7 @@ class VideoOutput private constructor(
             val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val uri = requireNotNull(resolver.insert(collection, values)) { "MediaStore insert failed" }
             val fd = try {
-                requireNotNull(resolver.openFileDescriptor(uri, "w"))
+                requireNotNull(resolver.openFileDescriptor(uri, "rw"))
             } catch (e: Exception) {
                 resolver.delete(uri, null, null)
                 throw e

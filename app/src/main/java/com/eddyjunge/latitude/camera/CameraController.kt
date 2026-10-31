@@ -778,7 +778,13 @@ class CameraController(context: Context) {
             .onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }
             .isSuccess
         active.recorder.release()
-        if (stopped) active.output.publish() else active.output.discard()
+        if (stopped) {
+            runCatching { FullRange.mark(active.output.fd.fileDescriptor) }
+                .onFailure { Log.w(TAG, "range tag not fixed", it) }
+            active.output.publish()
+        } else {
+            active.output.discard()
+        }
         _state.value = if (session != null) CameraState.Ready(formatLabel) else CameraState.Opening
         updateMeter()
     }
