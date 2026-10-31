@@ -76,6 +76,8 @@ class CameraController(context: Context) {
     private val _lenses = MutableStateFlow<List<Lens>>(emptyList())
     val lenses: StateFlow<List<Lens>> = _lenses.asStateFlow()
 
+    val audioInput = AudioInput(appContext, handler)
+
     /** Active format; null until resolved. The preview surface must match its preview size. */
     private val _config = MutableStateFlow<VideoConfig?>(null)
     val config: StateFlow<VideoConfig?> = _config.asStateFlow()
@@ -142,10 +144,13 @@ class CameraController(context: Context) {
     fun updateSettings(change: (CaptureSettings) -> CaptureSettings) {
         handler.post {
             if (recording != null) return@post
-            val next = change(_settings.value)
-            if (next == _settings.value) return@post
+            val prev = _settings.value
+            val next = change(prev)
+            if (next == prev) return@post
             _settings.value = next
             next.save(appContext)
+            audioInput.route(next.mic, active = wantOpen)
+            if (next.sameCamera(prev)) return@post
 
             closeSession()
             recorderSurface?.release()
@@ -170,6 +175,7 @@ class CameraController(context: Context) {
     fun open() {
         handler.post {
             wantOpen = true
+            audioInput.route(_settings.value.mic, active = true)
             openInternal()
         }
     }
@@ -178,6 +184,7 @@ class CameraController(context: Context) {
         handler.post {
             wantOpen = false
             closeInternal()
+            audioInput.route(_settings.value.mic, active = false)
         }
     }
 
@@ -185,6 +192,7 @@ class CameraController(context: Context) {
         handler.post {
             wantOpen = false
             closeInternal()
+            audioInput.release()
             recorderSurface?.release()
             recorderSurface = null
             thread.quitSafely()
@@ -297,7 +305,7 @@ class CameraController(context: Context) {
         for (level in candidates) {
             val surface = MediaCodec.createPersistentInputSurface()
             try {
-                buildRecorder(appContext, surface, config, level, 0, null, warmup).apply {
+                buildRecorder(appContext, surface, config, level, 0, null, null, warmup).apply {
                     try {
                         prepare()
                     } finally {
@@ -483,7 +491,8 @@ class CameraController(context: Context) {
         }
         var recorder: MediaRecorder? = null
         try {
-            recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, output.fd.fileDescriptor)
+            val audio = audioInput.choose(_settings.value.mic, _settings.value.micProcessing)
+            recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, audio, output.fd.fileDescriptor)
             recorder.prepare()
             recorder.start()
             // Feed the encoder only once it runs, otherwise the camera can stall on full buffers.

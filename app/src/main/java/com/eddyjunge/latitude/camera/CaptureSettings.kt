@@ -25,12 +25,20 @@ data class CaptureSettings(
     val lensKey: String? = null,
     val format: FrameFormat = FrameFormat.UHD,
     val stabilization: Stabilization = Stabilization.OPTICAL,
+    val mic: MicSource = MicSource.INTERNAL,
+    val micProcessing: MicProcessing = MicProcessing.STANDARD,
 ) {
+    /** Only these need a new camera session; audio is picked per recording. */
+    fun sameCamera(other: CaptureSettings) =
+        lensKey == other.lensKey && format == other.format && stabilization == other.stabilization
+
     fun save(context: Context) {
         prefs(context).edit()
             .putString(KEY_LENS, lensKey)
             .putString(KEY_FORMAT, format.name)
             .putString(KEY_STAB, stabilization.name)
+            .putString(KEY_MIC, mic.name)
+            .putString(KEY_MIC_PROCESSING, micProcessing.name)
             .apply()
     }
 
@@ -38,6 +46,8 @@ data class CaptureSettings(
         private const val KEY_LENS = "lens"
         private const val KEY_FORMAT = "format"
         private const val KEY_STAB = "stabilization"
+        private const val KEY_MIC = "mic"
+        private const val KEY_MIC_PROCESSING = "micProcessing"
 
         private fun prefs(context: Context) = context.getSharedPreferences("capture", Context.MODE_PRIVATE)
 
@@ -47,6 +57,8 @@ data class CaptureSettings(
                 lensKey = p.getString(KEY_LENS, null),
                 format = enumOrDefault(p.getString(KEY_FORMAT, null), FrameFormat.UHD),
                 stabilization = enumOrDefault(p.getString(KEY_STAB, null), Stabilization.OPTICAL),
+                mic = enumOrDefault(p.getString(KEY_MIC, null), MicSource.INTERNAL),
+                micProcessing = enumOrDefault(p.getString(KEY_MIC_PROCESSING, null), MicProcessing.STANDARD),
             )
         }
 

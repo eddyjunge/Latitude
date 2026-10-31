@@ -45,6 +45,8 @@ import com.eddyjunge.latitude.camera.CameraController
 import com.eddyjunge.latitude.camera.CameraState
 import com.eddyjunge.latitude.camera.FrameFormat
 import com.eddyjunge.latitude.camera.Lens
+import com.eddyjunge.latitude.camera.MicProcessing
+import com.eddyjunge.latitude.camera.MicSource
 import com.eddyjunge.latitude.camera.Stabilization
 import com.eddyjunge.latitude.camera.VideoConfig
 import kotlinx.coroutines.delay
@@ -85,6 +87,7 @@ fun CameraScreen(
         val lenses by camera.lenses.collectAsState()
         val config by camera.config.collectAsState()
         val exposure by camera.exposure.collectAsState()
+        val mics by camera.audioInput.available.collectAsState()
         val recording = state is CameraState.Recording
         // Lens, format and stabilization rebuild the session, so they are frozen mid-clip.
         val canChange = !recording && state !is CameraState.Opening
@@ -112,12 +115,12 @@ fun CameraScreen(
             selected = config?.lens?.key,
             enabled = canChange,
             onSelect = { lens -> camera.updateSettings { it.copy(lensKey = lens.key) } },
-            modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 16.dp, top = 64.dp),
         )
 
-        Column(
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+        Row(
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 32.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Chip(
                 text = settings.format.label,
@@ -131,6 +134,24 @@ fun CameraScreen(
                 enabled = canChange,
                 onClick = { camera.updateSettings { it.copy(stabilization = it.stabilization.next()) } },
             )
+            // A saved source that is unplugged right now records from the internal mic.
+            val mic = settings.mic.takeIf { it in mics } ?: MicSource.INTERNAL
+            Chip(
+                text = mic.label,
+                active = mic != MicSource.INTERNAL,
+                enabled = !recording,
+                onClick = {
+                    camera.updateSettings { it.copy(mic = mics[(mics.indexOf(mic) + 1) % mics.size]) }
+                },
+            )
+            if (mic != MicSource.OFF && mic != MicSource.BLUETOOTH && camera.audioInput.rawSupported) {
+                Chip(
+                    text = settings.micProcessing.label,
+                    active = settings.micProcessing == MicProcessing.RAW,
+                    enabled = !recording,
+                    onClick = { camera.updateSettings { it.copy(micProcessing = it.micProcessing.next()) } },
+                )
+            }
         }
 
         RecordButton(

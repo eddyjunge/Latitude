@@ -9,7 +9,8 @@ import java.io.FileDescriptor
 
 /**
  * Builds a MediaRecorder that encodes from the persistent [surface].
- * HEVC Main10 at [hevcLevel] for 10-bit, or 8-bit Main when [hevcLevel] is null; AAC 48 kHz stereo.
+ * HEVC Main10 at [hevcLevel] for 10-bit, or 8-bit Main when [hevcLevel] is null; AAC 48 kHz
+ * from [audio], or no sound track when it is null.
  */
 fun buildRecorder(
     context: Context,
@@ -17,11 +18,15 @@ fun buildRecorder(
     config: VideoConfig,
     hevcLevel: Int?,
     orientationHint: Int,
+    audio: AudioChoice?,
     output: FileDescriptor?,
     warmupFile: File? = null,
 ): MediaRecorder = MediaRecorder(context).apply {
-    val withAudio = warmupFile == null
-    if (withAudio) setAudioSource(MediaRecorder.AudioSource.CAMCORDER)
+    val withAudio = audio != null && warmupFile == null
+    if (withAudio) {
+        setAudioSource(audio.audioSource)
+        audio.device?.let { setPreferredDevice(it) }
+    }
     setVideoSource(MediaRecorder.VideoSource.SURFACE)
     setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
     if (output != null) setOutputFile(output) else setOutputFile(warmupFile)
@@ -33,8 +38,8 @@ fun buildRecorder(
     if (withAudio) {
         setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
         setAudioSamplingRate(48_000)
-        setAudioChannels(2)
-        setAudioEncodingBitRate(320_000)
+        setAudioChannels(audio.channels)
+        setAudioEncodingBitRate(160_000 * audio.channels)
     }
     setInputSurface(surface)
     setOrientationHint(orientationHint)
