@@ -13,7 +13,6 @@ import android.hardware.camera2.params.DynamicRangeProfiles
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
-import android.media.MediaCodecInfo.CodecProfileLevel
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
@@ -36,8 +35,6 @@ private const val TAG = "CameraController"
 /** Ignore a second trigger within this window so one press never starts and stops at once. */
 private const val TOGGLE_DEBOUNCE_MS = 600L
 
-/** High tier is needed above 40 Mbit/s; fall back to Main tier if the encoder refuses it. */
-private val HEVC_10BIT_LEVELS = listOf(CodecProfileLevel.HEVCHighTierLevel51, CodecProfileLevel.HEVCMainTierLevel51)
 
 sealed interface CameraState {
     data object Idle : CameraState
@@ -46,6 +43,9 @@ sealed interface CameraState {
     data class Recording(val format: String, val startedAt: Long) : CameraState
     data class Error(val message: String) : CameraState
 }
+
+/** Auto exposure, white balance and focus, each frozen independently. */
+data class Locks(val ae: Boolean = false, val awb: Boolean = false, val af: Boolean = false)
 
 /**
  * Owns the camera, the capture session and the recorder. All camera work runs on one
@@ -65,9 +65,20 @@ class CameraController(context: Context) {
     private val _state = MutableStateFlow<CameraState>(CameraState.Idle)
     val state: StateFlow<CameraState> = _state.asStateFlow()
 
-    /** Exposure, white balance and focus held by the user; always held while recording. */
-    private val _locked = MutableStateFlow(false)
-    val locked: StateFlow<Boolean> = _locked.asStateFlow()
+    /** Held by the user only; starting a recording never changes them. */
+    private val _locks = MutableStateFlow(Locks())
+    val locks: StateFlow<Locks> = _locks.asStateFlow()
+
+    private val _settings = MutableStateFlow(CaptureSettings.load(appContext))
+    val settings: StateFlow<CaptureSettings> = _settings.asStateFlow()
+
+    /** Lenses the user can pick; empty until the camera thread has looked them up. */
+    private val _lenses = MutableStateFlow<List<Lens>>(emptyList())
+    val lenses: StateFlow<List<Lens>> = _lenses.asStateFlow()
+
+    /** Active format; null until resolved. The preview surface must match its preview size. */
+    private val _config = MutableStateFlow<VideoConfig?>(null)
+    val config: StateFlow<VideoConfig?> = _config.asStateFlow()
 
     /** Live exposure readout, e.g. "ISO 100 · 1/50". */
     private val _exposure = MutableStateFlow("")
@@ -77,10 +88,8 @@ class CameraController(context: Context) {
     @Volatile
     var displayRotation: () -> Int = { 90 }
 
-    private val config: VideoConfig by lazy { VideoConfig.select(manager) }
-
-    /** Size the preview surface must have, or null if no usable camera exists. */
-    val previewSize: Size? get() = runCatching { config.previewSize }.getOrNull()
+    /** Size the preview surface must have, or null while no format is resolved. */
+    val previewSize: Size? get() = _config.value?.previewSize
 
     // Everything below is only touched on the camera thread.
     private var wantOpen = false
@@ -90,7 +99,9 @@ class CameraController(context: Context) {
     private var sessionPending = false
     private var previewSurface: Surface? = null
     private var recorderSurface: Surface? = null
+    private var openedId: String? = null
     private var tenBitAllowed = true
+    private var eisAllowed = true
     private var hevcLevel: Int? = null
     private var lastFocusDistance: Float? = null
     private var lastExposureUpdate = 0L
@@ -100,10 +111,61 @@ class CameraController(context: Context) {
 
     private class ActiveRecording(val recorder: MediaRecorder, val output: VideoOutput)
 
-    private val tenBit get() = tenBitAllowed && config.hlgSupported
+    private val tenBit get() = tenBitAllowed && _config.value?.hlgSupported == true
 
     private val formatLabel
-        get() = config.label + if (tenBit) " · HLG 10-bit" else " · SDR 8-bit"
+        get() = _config.value?.label.orEmpty() + if (tenBit) " · HLG 10-bit" else " · SDR 8-bit"
+
+    init {
+        handler.post { resolveConfig() }
+    }
+
+    /** Camera thread. Picks the saved lens (or the main one) and resolves its format. */
+    private fun resolveConfig(): VideoConfig? = try {
+        val lenses = _lenses.value.ifEmpty { Lens.discover(manager).also { _lenses.value = it } }
+        val wanted = _settings.value
+        // Default: the back lens closest to a classic 24mm main camera.
+        val lens = lenses.firstOrNull { it.key == wanted.lensKey }
+            ?: lenses.filter { !it.front }.minByOrNull { kotlin.math.abs(it.equivalentMm - 24) }
+            ?: lenses.first()
+        VideoConfig.select(manager, lens, wanted.format).also {
+            tenBitAllowed = true
+            eisAllowed = true
+            _config.value = it
+        }
+    } catch (e: Exception) {
+        fail("Keine Kamera gefunden", e)
+        null
+    }
+
+    /** Switch lens, format or stabilization. Ignored while recording. */
+    fun updateSettings(change: (CaptureSettings) -> CaptureSettings) {
+        handler.post {
+            if (recording != null) return@post
+            val next = change(_settings.value)
+            if (next == _settings.value) return@post
+            _settings.value = next
+            next.save(appContext)
+
+            closeSession()
+            recorderSurface?.release()
+            recorderSurface = null
+            val old = _config.value
+            val oldPreview = old?.previewSize
+            val cfg = resolveConfig() ?: return@post
+            // Rebinding a session of the open logical camera to another physical lens crashes the
+            // Xiaomi 15 Ultra camera HAL (sensor acquire fails); a fresh open is reliable.
+            if (cfg.lens.openId != openedId || cfg.lens.key != old?.lens?.key) {
+                device?.close()
+                device = null
+                openedId = null
+            }
+            // A new preview size means the UI builds a new surface and hands it to us.
+            if (cfg.previewSize != oldPreview) previewSurface = null
+            if (wantOpen) openInternal()
+            createSessionIfReady()
+        }
+    }
 
     fun open() {
         handler.post {
@@ -159,28 +221,22 @@ class CameraController(context: Context) {
         }
     }
 
-    /** "Measure once, then lock": freezes the current auto values before framing a shot. */
-    fun toggleLock() {
+    /** "Measure once, then lock". Works during a recording too. */
+    fun setLocks(change: (Locks) -> Locks) {
         handler.post {
-            if (recording != null) return@post
-            _locked.value = !_locked.value
-            previewSurface?.let { runCatching { setRepeating(listOf(it), _locked.value) } }
+            _locks.value = change(_locks.value)
+            runCatching { setRepeating() }
         }
     }
 
     @SuppressLint("MissingPermission") // the activity only calls open() once permissions are granted
     private fun openInternal() {
         if (device != null || opening) return
-        val cfg = try {
-            config
-        } catch (e: Exception) {
-            fail("Keine Rückkamera gefunden", e)
-            return
-        }
+        val cfg = _config.value ?: resolveConfig() ?: return
         opening = true
         _state.value = CameraState.Opening
         try {
-            manager.openCamera(cfg.cameraId, executor, deviceCallback)
+            manager.openCamera(cfg.lens.openId, executor, deviceCallback)
         } catch (e: Exception) {
             opening = false
             fail("Kamera lässt sich nicht öffnen", e)
@@ -194,6 +250,7 @@ class CameraController(context: Context) {
         closeSession()
         device?.close()
         device = null
+        openedId = null
         _state.value = CameraState.Idle
     }
 
@@ -204,7 +261,14 @@ class CameraController(context: Context) {
                 camera.close()
                 return
             }
+            // Settings may have switched to another camera while this one was opening.
+            if (camera.id != _config.value?.lens?.openId) {
+                camera.close()
+                openInternal()
+                return
+            }
             device = camera
+            openedId = camera.id
             createSessionIfReady()
         }
 
@@ -227,7 +291,8 @@ class CameraController(context: Context) {
      */
     private fun ensureRecorderSurface(): Surface? {
         recorderSurface?.let { return it }
-        val candidates = if (tenBit) HEVC_10BIT_LEVELS else listOf(null)
+        val config = _config.value ?: return null
+        val candidates = if (tenBit) config.hevcLevels else listOf(null)
         val warmup = File(appContext.cacheDir, "warmup.mp4")
         for (level in candidates) {
             val surface = MediaCodec.createPersistentInputSurface()
@@ -263,11 +328,16 @@ class CameraController(context: Context) {
         val dev = device ?: return
         val preview = previewSurface ?: return
         if (session != null || sessionPending) return
+        val config = _config.value ?: return
+        if (dev.id != config.lens.openId) return
         val encoder = ensureRecorderSurface() ?: return
 
         val profile = if (tenBit) DynamicRangeProfiles.HLG10 else DynamicRangeProfiles.STANDARD
         val outputs = listOf(preview, encoder).map { surface ->
-            OutputConfiguration(surface).apply { dynamicRangeProfile = profile }
+            OutputConfiguration(surface).apply {
+                dynamicRangeProfile = profile
+                config.lens.physicalId?.let { setPhysicalCameraId(it) }
+            }
         }
         val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
@@ -278,7 +348,7 @@ class CameraController(context: Context) {
                 }
                 session = s
                 try {
-                    setRepeating(listOf(preview), _locked.value)
+                    setRepeating()
                     _state.value = CameraState.Ready(formatLabel)
                     logStartupTime()
                 } catch (e: Exception) {
@@ -289,7 +359,11 @@ class CameraController(context: Context) {
             override fun onConfigureFailed(s: CameraCaptureSession) {
                 sessionPending = false
                 if (device !== dev) return
-                if (tenBit) {
+                if (eisActive) {
+                    Log.w(TAG, "session with electronic stabilization rejected, retrying without")
+                    eisAllowed = false
+                    createSessionIfReady()
+                } else if (tenBit) {
                     Log.w(TAG, "HLG10 session rejected, retrying in 8-bit")
                     tenBitAllowed = false
                     recorderSurface?.release()
@@ -302,9 +376,10 @@ class CameraController(context: Context) {
         }
         sessionPending = true
         try {
-            dev.createCaptureSession(
-                SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor, callback)
-            )
+            val sessionConfig = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor, callback)
+            // Stabilization can change the stream pipeline, so tell the HAL up front.
+            sessionConfig.sessionParameters = buildRequest(dev, listOf(preview)).build()
+            dev.createCaptureSession(sessionConfig)
         } catch (e: Exception) {
             sessionPending = false
             fail("Kamera-Session konnte nicht erstellt werden", e)
@@ -317,34 +392,52 @@ class CameraController(context: Context) {
         session = null
     }
 
+    private val eisActive: Boolean
+        get() = eisAllowed && _settings.value.stabilization == Stabilization.STANDARD && _config.value?.eisMode != null
+
     /**
      * TEMPLATE_RECORD for preview too, so nothing jumps when recording starts.
-     * With [lock], auto exposure and white balance hold their current values and focus is
-     * pinned to the last measured distance: nothing may change mid-clip.
+     * Each lock freezes its auto value; a focus lock pins the last measured distance.
      */
-    private fun setRepeating(targets: List<Surface>, lock: Boolean) {
-        val s = session ?: return
-        val dev = device ?: return
-        val request = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+    private fun buildRequest(dev: CameraDevice, targets: List<Surface>): CaptureRequest.Builder {
+        val config = _config.value!!
+        val locks = _locks.value
+        val stab = _settings.value.stabilization
+        return dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
             targets.forEach(::addTarget)
             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(config.fps, config.fps))
-            set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-            if (config.opticalStabilization) {
-                set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON)
+            set(
+                CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
+                if (eisActive) config.eisMode else CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF,
+            )
+            if (config.oisAvailable) {
+                set(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    if (stab == Stabilization.OFF) CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF
+                    else CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON,
+                )
             }
             config.noiseReductionMode?.let { set(CaptureRequest.NOISE_REDUCTION_MODE, it) }
             config.edgeMode?.let { set(CaptureRequest.EDGE_MODE, it) }
-            set(CaptureRequest.CONTROL_AE_LOCK, lock)
-            set(CaptureRequest.CONTROL_AWB_LOCK, lock)
+            set(CaptureRequest.CONTROL_AE_LOCK, locks.ae)
+            set(CaptureRequest.CONTROL_AWB_LOCK, locks.awb)
             val focus = lastFocusDistance
-            if (lock && config.manualFocus && focus != null) {
+            if (locks.af && config.manualFocus && focus != null) {
                 set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
                 set(CaptureRequest.LENS_FOCUS_DISTANCE, focus)
             } else {
                 set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             }
-        }.build()
-        s.setRepeatingRequest(request, captureCallback, handler)
+        }
+    }
+
+    /** Preview always; the encoder only while recording. */
+    private fun setRepeating() {
+        val s = session ?: return
+        val dev = device ?: return
+        val targets = listOfNotNull(previewSurface, recorderSurface.takeIf { recording != null || startingRecording })
+        if (targets.isEmpty()) return
+        s.setRepeatingRequest(buildRequest(dev, targets).build(), captureCallback, handler)
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
@@ -369,10 +462,12 @@ class CameraController(context: Context) {
         Log.i(TAG, "record-ready ${SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime()} ms after process start")
     }
 
+    private var startingRecording = false
+
     private fun startRecording() {
-        if (session == null) return
-        val preview = previewSurface ?: return
+        if (session == null || previewSurface == null) return
         val encoder = recorderSurface ?: return
+        val config = _config.value ?: return
 
         val output = try {
             VideoOutput.create(appContext)
@@ -380,15 +475,24 @@ class CameraController(context: Context) {
             fail("Speicher nicht verfügbar", e)
             return
         }
-        // Back camera: rotate by sensor orientation minus how far the display is turned.
-        val hint = (config.sensorOrientation - displayRotation() + 360) % 360
+        // Back camera: sensor orientation minus how far the display is turned; front is mirrored.
+        val hint = if (config.lens.front) {
+            (config.sensorOrientation + displayRotation()) % 360
+        } else {
+            (config.sensorOrientation - displayRotation() + 360) % 360
+        }
         var recorder: MediaRecorder? = null
         try {
             recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, output.fd.fileDescriptor)
             recorder.prepare()
             recorder.start()
             // Feed the encoder only once it runs, otherwise the camera can stall on full buffers.
-            setRepeating(listOf(preview, encoder), lock = true)
+            startingRecording = true
+            try {
+                setRepeating()
+            } finally {
+                startingRecording = false
+            }
         } catch (e: Exception) {
             recorder?.release()
             output.discard()
@@ -403,7 +507,7 @@ class CameraController(context: Context) {
         val active = recording ?: return
         recording = null
         // Stop feeding the encoder first, then finalize the file.
-        previewSurface?.let { preview -> runCatching { setRepeating(listOf(preview), _locked.value) } }
+        runCatching { setRepeating() }
         val stopped = runCatching { active.recorder.stop() }
             .onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }
             .isSuccess

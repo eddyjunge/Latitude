@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -27,11 +28,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -40,6 +43,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.eddyjunge.latitude.camera.CameraController
 import com.eddyjunge.latitude.camera.CameraState
+import com.eddyjunge.latitude.camera.FrameFormat
+import com.eddyjunge.latitude.camera.Lens
+import com.eddyjunge.latitude.camera.Stabilization
+import com.eddyjunge.latitude.camera.VideoConfig
 import kotlinx.coroutines.delay
 
 private val RecordRed = Color(0xFFFF3B30)
@@ -73,11 +80,21 @@ fun CameraScreen(
         }
 
         val state by camera.state.collectAsState()
-        val locked by camera.locked.collectAsState()
+        val locks by camera.locks.collectAsState()
+        val settings by camera.settings.collectAsState()
+        val lenses by camera.lenses.collectAsState()
+        val config by camera.config.collectAsState()
         val exposure by camera.exposure.collectAsState()
         val recording = state is CameraState.Recording
+        // Lens, format and stabilization rebuild the session, so they are frozen mid-clip.
+        val canChange = !recording && state !is CameraState.Opening
 
-        CameraPreview(camera, Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(16f / 9f))
+        config?.let { cfg ->
+            // A new preview size needs a new surface; key() throws the old view away.
+            key(cfg.previewSize) {
+                CameraPreview(camera, Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(cfg.aspectRatio))
+            }
+        }
 
         StatusBar(state, exposure, thermalStatus, Modifier.align(Alignment.TopCenter).padding(top = 16.dp))
 
@@ -90,6 +107,32 @@ fun CameraScreen(
             )
         }
 
+        LensPicker(
+            lenses = lenses,
+            selected = config?.lens?.key,
+            enabled = canChange,
+            onSelect = { lens -> camera.updateSettings { it.copy(lensKey = lens.key) } },
+            modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
+        )
+
+        Column(
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = 20.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Chip(
+                text = settings.format.label,
+                active = settings.format == FrameFormat.OPEN_GATE,
+                enabled = canChange,
+                onClick = { camera.updateSettings { it.copy(format = it.format.next()) } },
+            )
+            Chip(
+                text = stabilizationLabel(settings.stabilization, config),
+                active = settings.stabilization != Stabilization.OFF,
+                enabled = canChange,
+                onClick = { camera.updateSettings { it.copy(stabilization = it.stabilization.next()) } },
+            )
+        }
+
         RecordButton(
             recording = recording,
             enabled = state is CameraState.Ready || recording,
@@ -97,12 +140,15 @@ fun CameraScreen(
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 28.dp),
         )
 
-        LockButton(
-            locked = locked || recording,
-            enabled = state is CameraState.Ready,
-            onClick = camera::toggleLock,
+        val live = state is CameraState.Ready || recording
+        Row(
             modifier = Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 32.dp),
-        )
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            LockChip("AE", locks.ae, live) { camera.setLocks { it.copy(ae = !it.ae) } }
+            LockChip("AWB", locks.awb, live) { camera.setLocks { it.copy(awb = !it.awb) } }
+            LockChip("AF", locks.af, live) { camera.setLocks { it.copy(af = !it.af) } }
+        }
 
         (state as? CameraState.Error)?.let {
             BasicText(
@@ -208,16 +254,77 @@ private fun RecordButton(recording: Boolean, enabled: Boolean, onClick: () -> Un
     }
 }
 
-/** AE, AWB and AF held. Yellow like a camera's lock indicator; always on while recording. */
+private val LockYellow = Color(0xFFFFD60A)
+
+/** One frozen auto value. Yellow like a camera's lock indicator. */
 @Composable
-private fun LockButton(locked: Boolean, enabled: Boolean, onClick: () -> Unit, modifier: Modifier) {
-    val color = if (locked) Color(0xFFFFD60A) else Secondary
+private fun LockChip(text: String, locked: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val color = if (locked) LockYellow else Secondary
     BasicText(
-        text = "AE · AWB · AF LOCK",
-        style = LabelStyle.copy(color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold),
-        modifier = modifier
+        text = if (locked) "$text 🔒" else text,
+        style = LabelStyle.copy(color = color, fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+        modifier = Modifier
             .border(1.dp, color, RoundedCornerShape(50))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
     )
 }
+
+@Composable
+private fun Chip(text: String, active: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    val color = when {
+        !enabled -> Color(0x55FFFFFF)
+        active -> Color.White
+        else -> Secondary
+    }
+    BasicText(
+        text = text,
+        style = LabelStyle.copy(color = color, fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+        modifier = Modifier
+            .background(Color(0x66000000), RoundedCornerShape(50))
+            .border(1.dp, color, RoundedCornerShape(50))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    )
+}
+
+/** Fixed lenses, no automatic switching: what you tap is what records. */
+@Composable
+private fun LensPicker(
+    lenses: List<Lens>,
+    selected: String?,
+    enabled: Boolean,
+    onSelect: (Lens) -> Unit,
+    modifier: Modifier,
+) {
+    Column(
+        modifier = modifier.background(Color(0x66000000), RoundedCornerShape(24.dp)).padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        lenses.forEach { lens ->
+            val isSelected = lens.key == selected
+            val color = when {
+                isSelected -> LockYellow
+                enabled -> Color.White
+                else -> Color(0x55FFFFFF)
+            }
+            BasicText(
+                text = lens.label,
+                style = LabelStyle.copy(color = color, fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (isSelected) Color(0x33FFFFFF) else Color.Transparent)
+                    .clickable(enabled = enabled && !isSelected) { onSelect(lens) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+private fun stabilizationLabel(stab: Stabilization, config: VideoConfig?): String = when {
+    stab == Stabilization.OPTICAL && config?.oisAvailable == false -> "KEIN OIS"
+    stab == Stabilization.STANDARD && config?.oisAvailable == false -> "EIS"
+    else -> stab.label
+}
+
+private inline fun <reified T : Enum<T>> T.next(): T = enumValues<T>().let { it[(ordinal + 1) % it.size] }
