@@ -10,6 +10,7 @@ import android.view.Surface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.nio.ByteBuffer
 import java.nio.IntBuffer
 import kotlin.math.pow
 
@@ -21,8 +22,11 @@ const val ZEBRA_OFF = 0
 /** Zebra setting: stripes just below where this profile clips, whatever signal value that is. */
 const val ZEBRA_CLIP = 100
 
-/** Low-resolution map of the striped area: one byte per cell, non-zero = stripes. */
-class ZebraMask(val width: Int, val height: Int, val cells: ByteArray)
+/**
+ * Low-resolution map of the striped area in screen orientation: an alpha-only bitmap, opaque
+ * where stripes go. The meter reuses its bitmaps in turn, so draw it right away, don't keep it.
+ */
+class ZebraMask(val bitmap: Bitmap)
 
 /**
  * Zebra stripes for the viewfinder. A few times per second the preview is read back at a low
@@ -47,6 +51,12 @@ internal class ZebraMeter(
     private var aspect = 4f / 3
     private var profile = ColorProfile.HLG
     private var lastLog = 0L
+    private var copyNs = 0L
+
+    /** Masks handed out in turn: one being drawn, one waiting to be, one being written. */
+    private val masks = arrayOfNulls<Bitmap>(MASKS)
+    private var nextMask = 0
+    private var cells = ByteArray(0)
 
     /**
      * Meters [surface] for [level] in [profile]; a null surface or [ZEBRA_OFF] stops and
@@ -96,9 +106,11 @@ internal class ZebraMeter(
         if (!prepareBitmap()) return stop()
         val target = bitmap ?: return
         copying = true
+        val requestedAt = SystemClock.elapsedRealtimeNanos()
         val requested = runCatching {
             PixelCopy.request(source, target, { result ->
                 copying = false
+                copyNs = SystemClock.elapsedRealtimeNanos() - requestedAt
                 if (surface !== source) {
                     surface?.let { handler.postDelayed(tick, INTERVAL_MS) }
                     return@request
@@ -113,7 +125,9 @@ internal class ZebraMeter(
         }
     }
 
-    private fun evaluate(source: Bitmap): ZebraMask {
+    /** Null when nothing reaches the level: the overlay then has nothing to redraw. */
+    private fun evaluate(source: Bitmap): ZebraMask? {
+        val start = SystemClock.elapsedRealtimeNanos()
         pixels.rewind()
         source.copyPixelsToBuffer(pixels)
         val data = pixels.array()
@@ -123,7 +137,7 @@ internal class ZebraMeter(
         val rotation = displayRotation()
         // The mask in screen orientation; a quarter turn swaps the readback's sides.
         val (w, h) = if (rotation % 180 != 0) rh to rw else rw to rh
-        val cells = ByteArray(w * h)
+        if (cells.size != w * h) cells = ByteArray(w * h) else cells.fill(0)
         var peak = 0.0
         var hits = 0
         for (y in 0 until h) {
@@ -145,7 +159,7 @@ internal class ZebraMeter(
                 }
                 if (max > peak) peak = max
                 if (max >= threshold) {
-                    cells[y * w + x] = 1
+                    cells[y * w + x] = -1
                     hits++
                 }
             }
@@ -153,14 +167,26 @@ internal class ZebraMeter(
         val now = SystemClock.elapsedRealtime()
         if (now - lastLog > LOG_INTERVAL_MS) {
             lastLog = now
-            Log.d(TAG, "peak %.3f, threshold %.3f, striped %.1f %%, rotation $rotation".format(peak, threshold, hits * 100.0 / cells.size))
+            Log.d(
+                TAG,
+                "peak %.3f, threshold %.3f, striped %.1f %%, rotation $rotation, copy %.1f ms, evaluate %.1f ms".format(
+                    peak, threshold, hits * 100.0 / cells.size, copyNs / 1e6, (SystemClock.elapsedRealtimeNanos() - start) / 1e6,
+                ),
+            )
         }
-        return ZebraMask(w, h, cells)
+        if (hits == 0) return null
+        val mask = masks[nextMask]?.takeIf { it.width == w && it.height == h }
+            ?: Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8).also { masks[nextMask] = it }
+        nextMask = (nextMask + 1) % MASKS
+        mask.copyPixelsFromBuffer(ByteBuffer.wrap(cells))
+        return ZebraMask(mask)
     }
 
     companion object {
         private const val MASK_W = 192
-        private const val INTERVAL_MS = 100L
+        /** Every frame at 30 fps: at 10 per second the stripes visibly trailed a pan. */
+        private const val INTERVAL_MS = 33L
+        private const val MASKS = 3
         private const val FIRST_DELAY_MS = 600L
         private const val LOG_INTERVAL_MS = 2000L
 

@@ -1,6 +1,12 @@
 package com.eddyjunge.latitude.ui
 
-import android.graphics.Bitmap
+import android.graphics.BitmapShader
+import android.graphics.ComposeShader
+import android.graphics.LinearGradient
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.Shader
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.SurfaceHolder
@@ -57,20 +63,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.TileMode
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.max
@@ -91,7 +90,6 @@ import com.eddyjunge.latitude.camera.SHUTTER_180
 import com.eddyjunge.latitude.camera.SHUTTER_AUTO
 import com.eddyjunge.latitude.camera.VideoConfig
 import com.eddyjunge.latitude.camera.ZebraMask
-import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 
@@ -659,38 +657,40 @@ private val METER_BAR = 7.dp
 private val METER_GAP = 4.dp
 
 /**
- * Diagonal stripes wherever [ZebraMeter] found the level reached. The mask is coarse (a few
- * pixels of screen per cell) and drawn smoothed, so its edges are soft rather than blocky.
+ * Diagonal stripes wherever [ZebraMeter] found the level reached. The coarse mask is stretched
+ * smoothly over the picture and cuts the stripes out in one shader, no extra layer; a new mask
+ * only redraws this canvas, nothing recomposes.
  */
 @Composable
 private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier) {
-    val mask by maskFlow.collectAsState()
-    val current = mask ?: return
-    val image = remember(current) {
-        val colors = IntArray(current.cells.size) { if (current.cells[it] != 0.toByte()) -1 else 0 }
-        Bitmap.createBitmap(colors, current.width, current.height, Bitmap.Config.ARGB_8888).asImageBitmap()
-    }
+    val mask = maskFlow.collectAsState()
     val density = LocalDensity.current
+    val paint = remember { Paint() }
     val stripes = remember(density) {
         val period = with(density) { ZEBRA_PERIOD.toPx() }
-        Brush.linearGradient(
-            0f to Color(0xD9FFFFFF), 0.5f to Color(0xD9FFFFFF), 0.5f to Color(0x99000000), 1f to Color(0x99000000),
-            start = Offset.Zero,
-            end = Offset(period, period),
-            tileMode = TileMode.Repeated,
+        LinearGradient(
+            0f, 0f, period, period,
+            intArrayOf(ZEBRA_LIGHT, ZEBRA_LIGHT, ZEBRA_DARK, ZEBRA_DARK),
+            floatArrayOf(0f, 0.5f, 0.5f, 1f),
+            Shader.TileMode.REPEAT,
         )
     }
-    Canvas(modifier.graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
-        drawImage(
-            image,
-            dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
-            filterQuality = FilterQuality.Low,
-        )
-        drawRect(stripes, blendMode = BlendMode.SrcIn)
+    val matrix = remember { Matrix() }
+    Canvas(modifier) {
+        val bitmap = mask.value?.bitmap ?: return@Canvas
+        val cutout = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        // Inside a ComposeShader the paint's filter flag doesn't reach the bitmap.
+        cutout.filterMode = BitmapShader.FILTER_MODE_LINEAR
+        matrix.setScale(size.width / bitmap.width, size.height / bitmap.height)
+        cutout.setLocalMatrix(matrix)
+        paint.shader = ComposeShader(stripes, cutout, PorterDuff.Mode.DST_IN)
+        drawContext.canvas.nativeCanvas.drawRect(0f, 0f, size.width, size.height, paint)
     }
 }
 
 private val ZEBRA_PERIOD = 9.dp
+private const val ZEBRA_LIGHT = 0xD9FFFFFF.toInt()
+private const val ZEBRA_DARK = 0x99000000.toInt()
 
 /** Holds an automatic value. Yellow like a camera's lock indicator. */
 @Composable
