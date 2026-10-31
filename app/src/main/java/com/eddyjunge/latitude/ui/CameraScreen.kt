@@ -97,6 +97,7 @@ fun CameraScreen(
     camera: CameraController,
     hasPermissions: Boolean,
     thermalStatus: Int,
+    standby: Boolean,
     onRequestPermissions: () -> Unit,
     onOpenProbe: () -> Unit,
     onOpenGallery: () -> Unit,
@@ -277,6 +278,26 @@ fun CameraScreen(
                 onOpenProbe = onOpenProbe,
                 onClose = { panel = null },
             )
+        }
+
+        // The activity ends standby on any touch; this only has to cover the controls.
+        if (standby) {
+            Column(
+                modifier = Modifier.fillMaxSize().background(Color.Black).clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) {},
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                BasicText("STANDBY", style = CaptionStyle.copy(color = Color.White, fontSize = 13.sp))
+                Spacer(Modifier.height(8.dp))
+                BasicText(
+                    "Kamera aus, damit das Handy kühl bleibt. Tippen zum Fortsetzen, Lautstärketaste nimmt sofort auf.",
+                    style = LabelStyle.copy(color = Secondary, fontSize = 13.sp, textAlign = TextAlign.Center),
+                    modifier = Modifier.widthIn(max = 320.dp),
+                )
+            }
         }
     }
 }

@@ -81,9 +81,12 @@ class CameraController(context: Context) {
     private val _lenses = MutableStateFlow<List<Lens>>(emptyList())
     val lenses: StateFlow<List<Lens>> = _lenses.asStateFlow()
 
+    // Before audioInput: its device callback can run updateMeter() on the camera thread while
+    // this constructor is still running.
+    private val meter = AudioMeter()
+
     val audioInput = AudioInput(appContext, handler) { handler.post { updateMeter() } }
 
-    private val meter = AudioMeter()
     /** Live mic level per channel; null while the mic is off or the camera is closed. */
     val audioLevels: StateFlow<List<ChannelLevel>?> = meter.levels
 
@@ -109,6 +112,10 @@ class CameraController(context: Context) {
     private var session: CameraCaptureSession? = null
     private var sessionPending = false
     private var previewSurface: Surface? = null
+    /** Sits between camera and [previewSurface] while a session runs. */
+    private var pacer: PreviewPacer? = null
+    /** Stopped pacers whose session hasn't confirmed it closed yet. */
+    private val retiredPacers = mutableListOf<PreviewPacer>()
     private var recorderSurface: Surface? = null
     private var openedId: String? = null
     private var tenBitAllowed = true
@@ -119,6 +126,7 @@ class CameraController(context: Context) {
     private var startupLogged = false
     private var recording: ActiveRecording? = null
     private var lastToggleAt = 0L
+    private var recordWhenReady = false
     private val brightnessLoop = BrightnessLoop(handler)
 
     /** Automatic white for matched colors; its white point survives lens switches. */
@@ -246,9 +254,25 @@ class CameraController(context: Context) {
         }
     }
 
+    /** Open (if needed) and start recording the moment the preview is live, e.g. out of standby. */
+    fun openAndRecord() {
+        handler.post {
+            wantOpen = true
+            audioInput.route(_settings.value.mic, active = true)
+            lastToggleAt = SystemClock.elapsedRealtime()
+            if (session != null) {
+                if (recording == null) startRecording()
+            } else {
+                recordWhenReady = true
+                openInternal()
+            }
+        }
+    }
+
     fun close() {
         handler.post {
             wantOpen = false
+            recordWhenReady = false
             closeInternal()
             audioInput.route(_settings.value.mic, active = false)
             updateMeter()
@@ -326,6 +350,9 @@ class CameraController(context: Context) {
         closeSession()
         device?.close()
         device = null
+        // A closed device delivers nothing more, whether or not onClosed came.
+        retiredPacers.forEach { it.release() }
+        retiredPacers.clear()
         openedId = null
         _state.value = CameraState.Idle
     }
@@ -409,33 +436,51 @@ class CameraController(context: Context) {
         val encoder = ensureRecorderSurface() ?: return
 
         val profile = if (tenBit) DynamicRangeProfiles.HLG10 else DynamicRangeProfiles.STANDARD
-        val outputs = listOf(preview, encoder).map { surface ->
+        // Without the pacer the preview still works, only less smoothly.
+        val paced = runCatching { PreviewPacer(preview, config.previewSize, handler) }
+            .onFailure { Log.w(TAG, "preview pacing unavailable", it) }
+            .getOrNull()
+        val cameraPreview = paced?.input ?: preview
+        val outputs = listOf(cameraPreview, encoder).map { surface ->
             OutputConfiguration(surface).apply {
                 dynamicRangeProfile = profile
                 config.lens.physicalId?.let { setPhysicalCameraId(it) }
+                // The pacer schedules frames on the display's clock.
+                if (surface === paced?.input) timestampBase = OutputConfiguration.TIMESTAMP_BASE_MONOTONIC
             }
         }
         val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(s: CameraCaptureSession) {
                 sessionPending = false
                 if (device !== dev || previewSurface !== preview) {
+                    paced?.stop()
                     s.close()
                     return
                 }
                 session = s
+                pacer = paced
                 try {
                     setRepeating()
                     _state.value = CameraState.Ready(formatLabel)
                     logStartupTime()
                     // Only now: opening the mic next to the camera HAL costs startup time.
                     updateMeter()
+                    if (recordWhenReady) {
+                        recordWhenReady = false
+                        startRecording()
+                    }
                 } catch (e: Exception) {
                     fail("Vorschau lässt sich nicht starten", e)
                 }
             }
 
+            override fun onClosed(s: CameraCaptureSession) {
+                paced?.let { retiredPacers.remove(it); it.release() }
+            }
+
             override fun onConfigureFailed(s: CameraCaptureSession) {
                 sessionPending = false
+                paced?.release()
                 if (device !== dev) return
                 if (eisActive) {
                     Log.w(TAG, "session with electronic stabilization rejected, retrying without")
@@ -456,10 +501,11 @@ class CameraController(context: Context) {
         try {
             val sessionConfig = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, executor, callback)
             // Stabilization can change the stream pipeline, so tell the HAL up front.
-            sessionConfig.sessionParameters = buildRequest(dev, listOf(preview)).build()
+            sessionConfig.sessionParameters = buildRequest(dev, listOf(cameraPreview)).build()
             dev.createCaptureSession(sessionConfig)
         } catch (e: Exception) {
             sessionPending = false
+            paced?.release()
             fail("Kamera-Session konnte nicht erstellt werden", e)
         }
     }
@@ -469,6 +515,9 @@ class CameraController(context: Context) {
         brightnessLoop.meter(null)
         whiteLoop.meter(null)
         repeating = null
+        // Released in onClosed: the camera may still deliver until then.
+        pacer?.let { it.stop(); retiredPacers += it }
+        pacer = null
         session?.close()
         session = null
     }
@@ -565,7 +614,7 @@ class CameraController(context: Context) {
     private fun setRepeating() {
         val s = session ?: return
         val dev = device ?: return
-        val targets = listOfNotNull(previewSurface, recorderSurface.takeIf { recording != null || startingRecording })
+        val targets = listOfNotNull(pacer?.input ?: previewSurface, recorderSurface.takeIf { recording != null || startingRecording })
         if (targets.isEmpty()) return
         val builder = buildRequest(dev, targets)
         s.setRepeatingRequest(builder.build(), captureCallback, handler)
