@@ -70,6 +70,7 @@ fun CameraScreen(
     thermalStatus: Int,
     onRequestPermissions: () -> Unit,
     onOpenProbe: () -> Unit,
+    onOpenGallery: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (!hasPermissions) {
@@ -107,6 +108,11 @@ fun CameraScreen(
                 text = "PROBE",
                 style = LabelStyle,
                 modifier = Modifier.align(Alignment.TopStart).clickable(onClick = onOpenProbe).padding(20.dp),
+            )
+            BasicText(
+                text = "GALERIE",
+                style = LabelStyle.copy(color = Color.White),
+                modifier = Modifier.align(Alignment.TopEnd).clickable(onClick = onOpenGallery).padding(20.dp),
             )
         }
 

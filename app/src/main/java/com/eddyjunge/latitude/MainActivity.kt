@@ -19,6 +19,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.eddyjunge.latitude.camera.CameraController
+import com.eddyjunge.latitude.gallery.GalleryActivity
 import com.eddyjunge.latitude.probe.ProbeActivity
 import com.eddyjunge.latitude.ui.CameraScreen
 
@@ -60,6 +61,7 @@ class MainActivity : ComponentActivity() {
                 thermalStatus = thermalStatus,
                 onRequestPermissions = { permissionLauncher.launch(REQUIRED_PERMISSIONS) },
                 onOpenProbe = { startActivity(Intent(this, ProbeActivity::class.java)) },
+                onOpenGallery = { startActivity(Intent(this, GalleryActivity::class.java)) },
             )
         }
         if (!hasPermissions) permissionLauncher.launch(REQUIRED_PERMISSIONS)
