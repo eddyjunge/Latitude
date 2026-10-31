@@ -6,6 +6,7 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.params.DynamicRangeProfiles
 import android.media.MediaCodecInfo.CodecProfileLevel
 import android.media.MediaRecorder
+import android.os.Build
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -26,6 +27,10 @@ data class VideoConfig(
     val hevcLevels: List<Int>,
     /** True if the camera can deliver 10-bit HLG; may still be dropped if the session rejects it. */
     val hlgSupported: Boolean,
+    /** Our fixed tone curves; null if the ISP takes no custom curve (then no Log either). */
+    val toneCurves: ToneCurves?,
+    /** This lens's color calibration for matched colors; null keeps the vendor's colors. */
+    val sensorColor: SensorColor?,
     /** Least processing the ISP offers; null keeps the template default. */
     val noiseReductionMode: Int?,
     val edgeMode: Int?,
@@ -35,6 +40,12 @@ data class VideoConfig(
     val eisMode: Int?,
     /** AF can be switched off and focus held at a fixed distance. */
     val manualFocus: Boolean,
+    val isoRange: Range<Int>,
+    val exposureRangeNs: Range<Long>,
+    /** The camera's own AE can hold a fixed exposure time and adjust only the ISO (Android 16+). */
+    val shutterPriority: Boolean,
+    /** Same the other way round: fixed ISO, automatic exposure time. */
+    val isoPriority: Boolean,
 ) {
     val label: String
         get() = when (format) {
@@ -43,6 +54,9 @@ data class VideoConfig(
         } + " · $fps"
 
     val aspectRatio: Float get() = videoSize.width.toFloat() / videoSize.height
+
+    /** Longest exposure that still fits into one frame. */
+    val frameDurationNs: Long get() = 1_000_000_000L / fps
 
     companion object {
         /** 25p first: matches 50 Hz mains lighting in Europe. */
@@ -60,7 +74,8 @@ data class VideoConfig(
         /** HEVC level 5.1 covers up to 8,912,896 luma samples per frame (e.g. 4096x2176). */
         private const val LEVEL_51_MAX_PIXELS = 8_912_896L
 
-        fun select(manager: CameraManager, lens: Lens, format: FrameFormat): VideoConfig {
+        /** [rawScale] is this lens's own color calibration, see [ColorCalibration]. */
+        fun select(manager: CameraManager, lens: Lens, format: FrameFormat, rawScale: DoubleArray?): VideoConfig {
             val opened = manager.getCameraCharacteristics(lens.openId)
             val chars = manager.getCameraCharacteristics(lens.characteristicsId)
             // A stream bound to a physical camera must use a size that camera supports.
@@ -82,12 +97,30 @@ data class VideoConfig(
                     ?.supportedProfiles?.contains(DynamicRangeProfiles.HLG10) == true
             }
 
+            val tonemapModes = opened.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES)?.toList().orEmpty()
+            val curvePoints = opened.get(CameraCharacteristics.TONEMAP_MAX_CURVE_POINTS) ?: 0
+            val toneCurves = if (CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE in tonemapModes && curvePoints >= 2) {
+                ToneCurves(curvePoints)
+            } else {
+                null
+            }
+            // Manual gains and matrix need MANUAL_POST_PROCESSING on the camera we open.
+            val caps = opened.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?.toList().orEmpty()
+            val sensorColor = SensorColor.of(chars, rawScale).takeIf {
+                CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING in caps
+            }
+
             val nrModes = opened.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES)?.toList().orEmpty()
             val edgeModes = opened.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES)?.toList().orEmpty()
             val oisModes = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.toList().orEmpty()
             val eisModes = opened.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES)?.toList().orEmpty()
             val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)?.toList().orEmpty()
             val minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+            val priorityModes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                opened.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_PRIORITY_MODES)?.toList().orEmpty()
+            } else {
+                emptyList()
+            }
 
             logCapabilities(lens, chars, fpsRanges)
 
@@ -109,6 +142,8 @@ data class VideoConfig(
                 bitrate = bitrate,
                 hevcLevels = hevcLevels,
                 hlgSupported = hlg,
+                toneCurves = toneCurves,
+                sensorColor = sensorColor,
                 noiseReductionMode = listOf(
                     CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL,
                     CameraMetadata.NOISE_REDUCTION_MODE_FAST,
@@ -121,6 +156,11 @@ data class VideoConfig(
                     CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON,
                 ).firstOrNull { it in eisModes },
                 manualFocus = CameraMetadata.CONTROL_AF_MODE_OFF in afModes && minFocus > 0f,
+                isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: Range(100, 3200),
+                exposureRangeNs = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+                    ?: Range(100_000L, 1_000_000_000L),
+                shutterPriority = CameraMetadata.CONTROL_AE_PRIORITY_MODE_SENSOR_EXPOSURE_TIME_PRIORITY in priorityModes,
+                isoPriority = CameraMetadata.CONTROL_AE_PRIORITY_MODE_SENSOR_SENSITIVITY_PRIORITY in priorityModes,
             )
         }
 

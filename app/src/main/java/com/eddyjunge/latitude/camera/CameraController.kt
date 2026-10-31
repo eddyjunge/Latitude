@@ -14,6 +14,7 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
@@ -34,6 +35,10 @@ private const val TAG = "CameraController"
 
 /** Ignore a second trigger within this window so one press never starts and stops at once. */
 private const val TOGGLE_DEBOUNCE_MS = 600L
+
+/** Frames the camera's AWB gets for the first white estimate: at least ~0.3 s, at most ~0.7 s. */
+private const val MIN_WHITE_FRAMES = 8
+private const val MAX_WHITE_FRAMES = 20
 
 
 sealed interface CameraState {
@@ -86,9 +91,9 @@ class CameraController(context: Context) {
     private val _config = MutableStateFlow<VideoConfig?>(null)
     val config: StateFlow<VideoConfig?> = _config.asStateFlow()
 
-    /** Live exposure readout, e.g. "ISO 100 · 1/50". */
-    private val _exposure = MutableStateFlow("")
-    val exposure: StateFlow<String> = _exposure.asStateFlow()
+    /** What the sensor is doing right now; null until the first frame. */
+    private val _exposure = MutableStateFlow<Exposure?>(null)
+    val exposure: StateFlow<Exposure?> = _exposure.asStateFlow()
 
     /** Display rotation in degrees; read when a recording starts. */
     @Volatile
@@ -114,13 +119,53 @@ class CameraController(context: Context) {
     private var startupLogged = false
     private var recording: ActiveRecording? = null
     private var lastToggleAt = 0L
+    private val brightnessLoop = BrightnessLoop(handler)
+
+    /** Automatic white for matched colors; its white point survives lens switches. */
+    private val whiteLoop = WhiteBalanceLoop(handler) { applyColor() }
+    private var whiteFrames = 0
+
+    /** The request currently repeating, kept so the exposure glide only touches two values. */
+    private var repeating: CaptureRequest.Builder? = null
 
     private class ActiveRecording(val recorder: MediaRecorder, val output: VideoOutput)
 
-    private val tenBit get() = tenBitAllowed && _config.value?.hlgSupported == true
+    private val tenBit
+        get() = tenBitAllowed && _config.value?.hlgSupported == true && _settings.value.colorProfile.tenBit
+
+    /** What actually gets recorded: Log needs the 10-bit session and a curve the ISP accepts. */
+    private val colorProfile: ColorProfile
+        get() = when {
+            !tenBit -> ColorProfile.REC709
+            _settings.value.colorProfile == ColorProfile.LOG && _config.value?.toneCurves != null -> ColorProfile.LOG
+            else -> ColorProfile.HLG
+        }
+
+    /** Our own gains, matrix and tone curve, identical on every lens, instead of the vendor's. */
+    private val matched: Boolean
+        get() = _settings.value.matchColors && _config.value?.let { it.sensorColor != null && it.toneCurves != null } == true
+
+    /** White point to render with; null while the camera's AWB still measures the first one. */
+    private val white: Xy?
+        get() = when (val kelvin = _settings.value.whiteBalance) {
+            WB_AUTO -> whiteLoop.white
+            else -> Xy.ofKelvin(kelvin)
+        }
+
+    /** Auto white without a first estimate yet: the camera's own AWB runs for a few frames. */
+    private val measuringWhite: Boolean
+        get() = matched && _settings.value.whiteBalance == WB_AUTO && whiteLoop.white == null
+
+    /** Gains and matrix for the lens in use, both in BT.709: the ISP converts to BT.2020 itself. */
+    private fun colorCorrection(config: VideoConfig): ColorCorrection? =
+        config.sensorColor?.let { sensor -> white?.let { sensor.correction(it, Primaries.BT709) } }
 
     private val formatLabel
-        get() = _config.value?.label.orEmpty() + if (tenBit) " · HLG 10-bit" else " · SDR 8-bit"
+        get() = _config.value?.label.orEmpty() + " · " + when (colorProfile) {
+            ColorProfile.REC709 -> "Rec.709 8-bit"
+            ColorProfile.HLG -> "HLG 10-bit"
+            ColorProfile.LOG -> "Apple Log 10-bit"
+        }
 
     init {
         handler.post { resolveConfig() }
@@ -134,9 +179,14 @@ class CameraController(context: Context) {
         val lens = lenses.firstOrNull { it.key == wanted.lensKey }
             ?: lenses.filter { !it.front }.minByOrNull { kotlin.math.abs(it.equivalentMm - 24) }
             ?: lenses.first()
-        VideoConfig.select(manager, lens, wanted.format).also {
+        VideoConfig.select(manager, lens, wanted.format, ColorCalibration.load(appContext, lens.characteristicsId)).also {
+            whiteLoop.sensor = it.sensorColor
             tenBitAllowed = true
             eisAllowed = true
+            if (it.lens != _config.value?.lens) {
+                brightnessLoop.reset()
+                _exposure.value = null
+            }
             _config.value = it
         }
     } catch (e: Exception) {
@@ -144,18 +194,29 @@ class CameraController(context: Context) {
         null
     }
 
-    /** Switch lens, format or stabilization. Ignored while recording. */
+    /** Change what the user picked. Only exposure may change while recording. */
     fun updateSettings(change: (CaptureSettings) -> CaptureSettings) {
         handler.post {
-            if (recording != null) return@post
             val prev = _settings.value
             val next = change(prev)
             if (next == prev) return@post
+            if (recording != null && !next.onlyExposureDiffers(prev)) return@post
             _settings.value = next
             next.save(appContext)
+            if (next.onlyExposureDiffers(prev)) {
+                runCatching { setRepeating() }
+                return@post
+            }
             audioInput.route(next.mic, active = wantOpen)
             updateMeter()
-            if (next.sameCamera(prev)) return@post
+            if (next.sameCamera(prev)) {
+                // HLG and Log share the session; only the tonemap curve of the request changes.
+                if ((next.colorProfile != prev.colorProfile || next.matchColors != prev.matchColors) && session != null) {
+                    runCatching { setRepeating() }
+                    _state.value = CameraState.Ready(formatLabel)
+                }
+                return@post
+            }
 
             closeSession()
             recorderSurface?.release()
@@ -405,6 +466,9 @@ class CameraController(context: Context) {
 
     private fun closeSession() {
         stopRecording()
+        brightnessLoop.meter(null)
+        whiteLoop.meter(null)
+        repeating = null
         session?.close()
         session = null
     }
@@ -436,8 +500,22 @@ class CameraController(context: Context) {
             }
             config.noiseReductionMode?.let { set(CaptureRequest.NOISE_REDUCTION_MODE, it) }
             config.edgeMode?.let { set(CaptureRequest.EDGE_MODE, it) }
-            set(CaptureRequest.CONTROL_AE_LOCK, locks.ae)
-            set(CaptureRequest.CONTROL_AWB_LOCK, locks.awb)
+            val correction = if (matched) colorCorrection(config) else null
+            if (correction != null) {
+                set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF)
+                set(CaptureRequest.COLOR_CORRECTION_MODE, CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX)
+                set(CaptureRequest.COLOR_CORRECTION_GAINS, correction.gains)
+                set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, correction.transform)
+            } else {
+                set(CaptureRequest.CONTROL_AWB_LOCK, locks.awb)
+            }
+            // Log always needs our curve; matched colors use ours for HLG and Rec.709 too.
+            val curves = config.toneCurves
+            if (curves != null && (matched || colorProfile == ColorProfile.LOG)) {
+                set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
+                set(CaptureRequest.TONEMAP_CURVE, curves.of(colorProfile))
+            }
+            applyExposure(this, config, locks)
             val focus = lastFocusDistance
             if (locks.af && config.manualFocus && focus != null) {
                 set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
@@ -448,27 +526,117 @@ class CameraController(context: Context) {
         }
     }
 
+    /**
+     * Fixed values go straight to the sensor. A fixed shutter with auto ISO (or the reverse)
+     * uses the camera's priority AE where it exists, otherwise our [BrightnessLoop].
+     * The AE lock freezes whatever is automatic.
+     */
+    private fun applyExposure(request: CaptureRequest.Builder, config: VideoConfig, locks: Locks) = request.apply {
+        val target = ExposureTarget.of(_settings.value, config)
+        // Re-entering the loop starts from what the sensor does then, not from an old scene.
+        if (target.mode != AeMode.LOOP) brightnessLoop.reset()
+        when (target.mode) {
+            AeMode.CAMERA -> set(CaptureRequest.CONTROL_AE_LOCK, locks.ae)
+            AeMode.PRIORITY -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+                if (target.exposureNs != null) {
+                    set(CaptureRequest.CONTROL_AE_PRIORITY_MODE, CameraMetadata.CONTROL_AE_PRIORITY_MODE_SENSOR_EXPOSURE_TIME_PRIORITY)
+                    set(CaptureRequest.SENSOR_EXPOSURE_TIME, target.exposureNs)
+                } else {
+                    set(CaptureRequest.CONTROL_AE_PRIORITY_MODE, CameraMetadata.CONTROL_AE_PRIORITY_MODE_SENSOR_SENSITIVITY_PRIORITY)
+                    set(CaptureRequest.SENSOR_SENSITIVITY, target.iso)
+                }
+                set(CaptureRequest.CONTROL_AE_LOCK, locks.ae)
+            }
+            AeMode.MANUAL, AeMode.LOOP -> {
+                val (ns, iso) = if (target.mode == AeMode.LOOP) {
+                    brightnessLoop.resolve(target, config, _exposure.value)
+                } else {
+                    target.exposureNs!! to target.iso!!
+                }
+                set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+                set(CaptureRequest.SENSOR_EXPOSURE_TIME, ns)
+                set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                set(CaptureRequest.SENSOR_FRAME_DURATION, config.frameDurationNs)
+            }
+        }
+    }
+
     /** Preview always; the encoder only while recording. */
     private fun setRepeating() {
         val s = session ?: return
         val dev = device ?: return
         val targets = listOfNotNull(previewSurface, recorderSurface.takeIf { recording != null || startingRecording })
         if (targets.isEmpty()) return
-        s.setRepeatingRequest(buildRequest(dev, targets).build(), captureCallback, handler)
+        val builder = buildRequest(dev, targets)
+        s.setRepeatingRequest(builder.build(), captureCallback, handler)
+        repeating = builder
+        val config = _config.value ?: return
+        val looping = ExposureTarget.of(_settings.value, config).mode == AeMode.LOOP && !_locks.value.ae
+        brightnessLoop.profile = colorProfile
+        brightnessLoop.ownCurves = matched
+        brightnessLoop.meter(previewSurface.takeIf { looping })
+        val followLight = matched && _settings.value.whiteBalance == WB_AUTO && !_locks.value.awb && !measuringWhite
+        whiteLoop.meter(previewSurface.takeIf { followLight })
+    }
+
+    /** New white from [whiteLoop]: same request, new gains and matrix. */
+    private fun applyColor() {
+        val s = session ?: return
+        val builder = repeating ?: return
+        val correction = colorCorrection(_config.value ?: return) ?: return
+        builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, correction.gains)
+        builder.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, correction.transform)
+        runCatching { s.setRepeatingRequest(builder.build(), captureCallback, handler) }
+    }
+
+    /**
+     * Camera thread. The camera's AWB converged (or had its chance): turn its raw neutral into
+     * a lens-independent white point and switch to our own colors.
+     */
+    private fun takeFirstWhite(result: TotalCaptureResult) {
+        // "Converged" on the very first frames is the AWB's start value, not a measurement.
+        val converged = result[CaptureResult.CONTROL_AWB_STATE] == CameraMetadata.CONTROL_AWB_STATE_CONVERGED
+        whiteFrames++
+        if (whiteFrames < MIN_WHITE_FRAMES || (!converged && whiteFrames < MAX_WHITE_FRAMES)) return
+        val n = result[CaptureResult.SENSOR_NEUTRAL_COLOR_POINT] ?: return
+        val sensor = _config.value?.sensorColor ?: return
+        whiteFrames = 0
+        val g = n[1].toDouble()
+        whiteLoop.white = Xy.plausible(sensor.xyFor(doubleArrayOf(n[0].toDouble() / g, 1.0, n[2].toDouble() / g)))
+        Log.i(TAG, "first white ${whiteLoop.white?.cct?.toInt()} K from the camera's AWB")
+        runCatching { setRepeating() }
+    }
+
+    /** One frame of the brightness glide: same request, new exposure values. */
+    private fun glideExposure(config: VideoConfig) {
+        val s = session ?: return
+        val builder = repeating ?: return
+        val (ns, iso) = brightnessLoop.resolve(ExposureTarget.of(_settings.value, config), config, _exposure.value)
+        if (builder[CaptureRequest.SENSOR_EXPOSURE_TIME] == ns && builder[CaptureRequest.SENSOR_SENSITIVITY] == iso) return
+        builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ns)
+        builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+        runCatching { s.setRepeatingRequest(builder.build(), captureCallback, handler) }
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+            if (s === session && measuringWhite) takeFirstWhite(result)
             // While locked, keep the distance focus was pinned to rather than the lens readout.
             if (request[CaptureRequest.CONTROL_AF_MODE] != CameraMetadata.CONTROL_AF_MODE_OFF) {
                 lastFocusDistance = result[CaptureResult.LENS_FOCUS_DISTANCE]
             }
+            val iso = result[CaptureResult.SENSOR_SENSITIVITY] ?: return
+            val exposureNs = result[CaptureResult.SENSOR_EXPOSURE_TIME] ?: return
+            val config = _config.value ?: return
+            val looping = request[CaptureRequest.CONTROL_AE_MODE] == CameraMetadata.CONTROL_AE_MODE_OFF &&
+                ExposureTarget.of(_settings.value, config).mode == AeMode.LOOP
+            if (looping && s === session && brightnessLoop.step(iso.toDouble() * exposureNs, config.frameDurationNs)) {
+                glideExposure(config)
+            }
             val now = SystemClock.elapsedRealtime()
             if (now - lastExposureUpdate < 250) return
             lastExposureUpdate = now
-            val iso = result[CaptureResult.SENSOR_SENSITIVITY] ?: return
-            val exposureNs = result[CaptureResult.SENSOR_EXPOSURE_TIME] ?: return
-            _exposure.value = "ISO $iso · 1/${Math.round(1e9 / exposureNs)}"
+            _exposure.value = Exposure(iso, exposureNs, atLimit = looping && brightnessLoop.atLimit)
         }
     }
 
@@ -487,7 +655,7 @@ class CameraController(context: Context) {
         val config = _config.value ?: return
 
         val output = try {
-            VideoOutput.create(appContext)
+            VideoOutput.create(appContext, colorProfile)
         } catch (e: Exception) {
             fail("Speicher nicht verfügbar", e)
             return

@@ -54,6 +54,8 @@ class ProbeActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The tests run for minutes; the screen must not lock in between.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent { Screen() }
     }
 
@@ -67,6 +69,8 @@ class ProbeActivity : ComponentActivity() {
             BasicText(status, style = Body.copy(color = Color(0x99FFFFFF)))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Button(if (report == null) "Start probe" else "Run again", enabled = !running) { start() }
+                Button("Color test", enabled = !running) { startColorTest() }
+                Button("Calibrate colors", enabled = !running) { startCalibration() }
                 if (savedUri != null) Button("Share JSON", enabled = !running) { share() }
             }
             if (summary.isNotEmpty()) BasicText(summary, style = Mono)
@@ -115,13 +119,51 @@ class ProbeActivity : ComponentActivity() {
         }
     }
 
+    /** Only the cross-lens color test: quick enough to repeat for several test colors. */
+    private fun startColorTest() {
+        running = true
+        lifecycleScope.launch {
+            try {
+                status = "Color test on every lens…"
+                val json = JSONObject().put("probeVersion", 1).put("createdAt", Date().toString())
+                    .put("colorTest", ColorTest(getSystemService(CameraManager::class.java)).run())
+                savedUri = withContext(Dispatchers.IO) { save(json, "color") }
+                status = "Color test saved to Download/Latitude."
+            } catch (e: Exception) {
+                status = "Color test failed: $e"
+            } finally {
+                running = false
+            }
+        }
+    }
+
+    /** Point every back lens at the same evenly lit white or grey surface first. */
+    private fun startCalibration() {
+        running = true
+        lifecycleScope.launch {
+            try {
+                status = "Calibrating: keep the phone pointed at the white surface…"
+                val result = ColorTest(getSystemService(CameraManager::class.java)).calibrate(this@ProbeActivity)
+                val json = JSONObject().put("probeVersion", 1).put("createdAt", Date().toString())
+                    .put("colorCalibration", result)
+                savedUri = withContext(Dispatchers.IO) { save(json, "calibration") }
+                summary = result.toString(2)
+                status = "Calibration saved. All lenses now see the same white."
+            } catch (e: Exception) {
+                status = "Calibration failed: $e"
+            } finally {
+                running = false
+            }
+        }
+    }
+
     private fun backCameras(manager: CameraManager) = manager.cameraIdList.filter {
         manager.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] == CameraMetadata.LENS_FACING_BACK
     }
 
-    private fun save(json: JSONObject): Uri {
+    private fun save(json: JSONObject, kind: String = "probe"): Uri {
         val model = android.os.Build.MODEL.replace(Regex("[^A-Za-z0-9]+"), "-")
-        val name = "probe_${model}_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".json"
+        val name = "${kind}_${model}_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".json"
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
             put(MediaStore.Downloads.MIME_TYPE, "application/json")

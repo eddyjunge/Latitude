@@ -20,6 +20,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Range
 import android.util.Size
+import com.eddyjunge.latitude.camera.AppleLog
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -32,7 +33,6 @@ import java.util.concurrent.Executor
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
-import kotlin.math.log2
 import kotlin.math.pow
 
 /**
@@ -148,18 +148,21 @@ internal class TonemapTest(private val manager: CameraManager) {
             }
             if (CameraMetadata.EDGE_MODE_OFF in edgeModes) set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
         }
-        fun curve(points: FloatArray): CaptureRequest.Builder.() -> Unit = {
+        fun curve(tonemap: TonemapCurve): CaptureRequest.Builder.() -> Unit = {
             locked()
             minimalProcessing()
             set(CaptureRequest.TONEMAP_MODE, CameraMetadata.TONEMAP_MODE_CONTRAST_CURVE)
-            set(CaptureRequest.TONEMAP_CURVE, TonemapCurve(points, points, points))
+            set(CaptureRequest.TONEMAP_CURVE, tonemap)
         }
+        fun curve(points: FloatArray) = curve(TonemapCurve(points, points, points))
 
         val phases = listOf(
             Phase("default", locked),
             Phase("identity", curve(floatArrayOf(0f, 0f, 1f, 1f))),
             Phase("flat", curve(floatArrayOf(0f, 0.5f, 1f, 0.5f))),
             Phase("appleLogH5", curve(appleLogCurve(maxPoints.coerceIn(3, 128), headroom = 5.0))),
+            // The app's curve: evenly spaced. Same stats as appleLogH5 means the ISP honors x.
+            Phase("appleLogEven", curve(AppleLog.tonemapCurve(maxPoints))),
         )
 
         val report = JSONObject()
@@ -348,24 +351,9 @@ internal class TonemapTest(private val manager: CameraManager) {
             for (i in 0 until points) {
                 val x = if (i == 0) 0.0 else 2.0.pow(-14.0 + 14.0 * (i - 1) / (points - 2))
                 out[i * 2] = x.toFloat()
-                out[i * 2 + 1] = appleLog(x * scale).coerceIn(0.0, 1.0).toFloat()
+                out[i * 2 + 1] = AppleLog.encode(x * scale).coerceIn(0.0, 1.0).toFloat()
             }
             return out
-        }
-
-        /** Apple Log encoding (Apple Log Profile white paper); input is scene-linear reflectance. */
-        fun appleLog(r: Double): Double {
-            val r0 = -0.05641088
-            val rt = 0.01
-            val c = 47.28711236
-            val beta = 0.00964052
-            val gamma = 0.08550479
-            val delta = 0.69336945
-            return when {
-                r < r0 -> 0.0
-                r < rt -> c * (r - r0) * (r - r0)
-                else -> gamma * log2(r + beta) + delta
-            }
         }
     }
 }

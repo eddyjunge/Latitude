@@ -13,26 +13,26 @@ import kotlinx.coroutines.flow.asStateFlow
 
 private const val TAG = "AudioInput"
 
-enum class MicSource(val label: String) {
-    INTERNAL("MIC INTERN"),
+enum class MicSource {
+    INTERNAL,
 
     /** USB-C receivers (e.g. DJI Mic receiver) and USB interfaces: full quality. */
-    USB("MIC USB"),
+    USB,
 
     /**
      * Bluetooth hands-free (HFP/SCO). Phones only take voice-grade mono (16 kHz at best) from
      * Bluetooth mics, which is how the DJI Mic Mini connects without its receiver.
      */
-    BLUETOOTH("MIC BT"),
-    OFF("TON AUS"),
+    BLUETOOTH,
+    OFF,
 }
 
-enum class MicProcessing(val label: String) {
+enum class MicProcessing {
     /** The phone's camcorder tuning: wind and noise reduction, automatic gain. */
-    STANDARD("TON STANDARD"),
+    STANDARD,
 
     /** No noise reduction or automatic gain; falls back to STANDARD if the phone can't. */
-    RAW("TON ROH"),
+    RAW,
 }
 
 /** Resolved choice for one recording; [device] null means the system default mic. */

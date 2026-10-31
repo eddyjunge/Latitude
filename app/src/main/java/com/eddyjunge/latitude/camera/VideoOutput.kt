@@ -27,8 +27,17 @@ class VideoOutput private constructor(
     }
 
     companion object {
-        fun create(context: Context): VideoOutput {
-            val name = "LAT_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+        /**
+         * The profile goes into the name: the file is tagged HLG even in Log (MediaRecorder sets
+         * no transfer of its own), so in Resolve the "_LOG" clips get Apple Log assigned by hand.
+         */
+        fun create(context: Context, profile: ColorProfile): VideoOutput {
+            val tag = when (profile) {
+                ColorProfile.REC709 -> "709"
+                ColorProfile.HLG -> "HLG"
+                ColorProfile.LOG -> "LOG"
+            }
+            val name = "LAT_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_$tag.mp4"
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")

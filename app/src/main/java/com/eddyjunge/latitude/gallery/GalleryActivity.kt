@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.LruCache
 import android.util.Size
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -57,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -64,6 +66,7 @@ import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_SURFACE_VIEW
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private val Label = TextStyle(
@@ -128,7 +131,8 @@ private fun formatSize(bytes: Long): String =
 
 /** Grid of recorded clips; tap one to play it, share it or delete it. */
 class GalleryActivity : ComponentActivity() {
-    private var clips by mutableStateOf<List<Clip>>(emptyList())
+    /** Null until the first query is back, so an empty gallery isn't announced too early. */
+    private var clips by mutableStateOf<List<Clip>?>(null)
     private var open by mutableStateOf<Clip?>(null)
 
     private val deleteLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
@@ -148,7 +152,7 @@ class GalleryActivity : ComponentActivity() {
             Box(Modifier.fillMaxSize().background(Color.Black)) {
                 val clip = open
                 if (clip == null) {
-                    ClipGrid(clips, onOpen = { open = it }, onClose = ::finish)
+                    ClipGrid(clips.orEmpty(), loaded = clips != null, onOpen = { open = it }, onClose = ::finish)
                 } else {
                     BackHandler { open = null }
                     ClipPlayer(clip, onClose = { open = null }, onShare = { share(clip) }, onDelete = { delete(clip) })
@@ -162,8 +166,11 @@ class GalleryActivity : ComponentActivity() {
         reload()
     }
 
+    /** The MediaStore query runs off the main thread so the grid opens without a hitch. */
     private fun reload() {
-        clips = loadClips(this)
+        lifecycleScope.launch {
+            clips = withContext(Dispatchers.IO) { loadClips(applicationContext) }
+        }
     }
 
     private fun share(clip: Clip) {
@@ -182,7 +189,7 @@ class GalleryActivity : ComponentActivity() {
 }
 
 @Composable
-private fun ClipGrid(clips: List<Clip>, onOpen: (Clip) -> Unit, onClose: () -> Unit) {
+private fun ClipGrid(clips: List<Clip>, loaded: Boolean, onOpen: (Clip) -> Unit, onClose: () -> Unit) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(220.dp),
         modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -199,7 +206,7 @@ private fun ClipGrid(clips: List<Clip>, onOpen: (Clip) -> Unit, onClose: () -> U
                 BasicText("${clips.size} Clips · ${formatSize(clips.sumOf { it.sizeBytes })}", style = Dim)
             }
         }
-        if (clips.isEmpty()) {
+        if (loaded && clips.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
                 BasicText("Noch keine Aufnahmen", style = Dim, modifier = Modifier.padding(32.dp))
             }
@@ -208,13 +215,20 @@ private fun ClipGrid(clips: List<Clip>, onOpen: (Clip) -> Unit, onClose: () -> U
     }
 }
 
+/** Decoded thumbnails, up to 48 MB, kept while the app runs. */
+private val thumbnails = object : LruCache<Uri, Bitmap>(48 * 1024 * 1024) {
+    override fun sizeOf(key: Uri, value: Bitmap) = value.allocationByteCount
+}
+
 @Composable
 private fun ClipTile(clip: Clip, onClick: () -> Unit) {
     val context = LocalContext.current
-    val thumb by produceState<Bitmap?>(null, clip.uri) {
+    // Scrolling back to a tile shows the cached thumbnail at once instead of decoding again.
+    val thumb by produceState(thumbnails.get(clip.uri), clip.uri) {
+        if (value != null) return@produceState
         value = withContext(Dispatchers.IO) {
             runCatching { context.contentResolver.loadThumbnail(clip.uri, Size(512, 384), null) }.getOrNull()
-        }
+        }?.also { thumbnails.put(clip.uri, it) }
     }
     Box(
         Modifier
