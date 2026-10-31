@@ -62,6 +62,9 @@ data class CaptureSettings(
     val whiteBalance: Int = WB_AUTO,
     /** Our own colors, identical on every lens, instead of the vendor's per-lens tuning. */
     val matchColors: Boolean = true,
+    /** Viewfinder only, never in the recording. */
+    /** [ZEBRA_OFF], a signal level in percent, or [ZEBRA_CLIP]. */
+    val zebra: Int = ZEBRA_OFF,
 ) {
     /**
      * Only these need a new camera session; audio is picked per recording. HLG and Log share
@@ -71,9 +74,12 @@ data class CaptureSettings(
         lensKey == other.lensKey && format == other.format && stabilization == other.stabilization &&
             colorProfile.tenBit == other.colorProfile.tenBit
 
-    /** Exposure and white balance are only request parameters, so they may change mid-take. */
+    /**
+     * Exposure and white balance are only request parameters and the zebra only marks the
+     * viewfinder, so they may change mid-take.
+     */
     fun onlyExposureDiffers(other: CaptureSettings) =
-        copy(shutter = other.shutter, iso = other.iso, whiteBalance = other.whiteBalance) == other
+        copy(shutter = other.shutter, iso = other.iso, whiteBalance = other.whiteBalance, zebra = other.zebra) == other
 
     fun save(context: Context) {
         prefs(context).edit()
@@ -87,6 +93,7 @@ data class CaptureSettings(
             .putInt(KEY_ISO, iso)
             .putInt(KEY_WB, whiteBalance)
             .putBoolean(KEY_MATCH, matchColors)
+            .putInt(KEY_ZEBRA, zebra)
             .apply()
     }
 
@@ -101,6 +108,7 @@ data class CaptureSettings(
         private const val KEY_ISO = "iso"
         private const val KEY_WB = "whiteBalance"
         private const val KEY_MATCH = "matchColors"
+        private const val KEY_ZEBRA = "zebraLevel"
 
         private fun prefs(context: Context) = context.getSharedPreferences("capture", Context.MODE_PRIVATE)
 
@@ -117,6 +125,7 @@ data class CaptureSettings(
                 iso = p.getInt(KEY_ISO, ISO_AUTO),
                 whiteBalance = p.getInt(KEY_WB, WB_AUTO),
                 matchColors = p.getBoolean(KEY_MATCH, true),
+                zebra = p.getInt(KEY_ZEBRA, ZEBRA_OFF),
             )
         }
 

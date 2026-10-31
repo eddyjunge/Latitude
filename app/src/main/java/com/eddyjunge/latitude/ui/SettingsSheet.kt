@@ -38,6 +38,9 @@ import com.eddyjunge.latitude.camera.SHUTTER_AUTO
 import com.eddyjunge.latitude.camera.Stabilization
 import com.eddyjunge.latitude.camera.VideoConfig
 import com.eddyjunge.latitude.camera.WB_AUTO
+import com.eddyjunge.latitude.camera.ZEBRA_CLIP
+import com.eddyjunge.latitude.camera.ZEBRA_OFF
+import com.eddyjunge.latitude.camera.ZebraMeter
 
 /**
  * Everything that is set once and then left alone, each with a plain sentence about what
@@ -169,6 +172,25 @@ internal fun SettingsSheet(
 
         Section("Belichtung")
         Setting(
+            title = "Zebra",
+            options = zebraOptions(settings),
+            selected = settings.zebra,
+            label = {
+                when (it) {
+                    ZEBRA_OFF -> "Aus"
+                    ZEBRA_CLIP -> "Clipping"
+                    else -> "$it %"
+                }
+            },
+            description = when (settings.zebra) {
+                ZEBRA_OFF -> "Streifen im Sucher, wo das Bild sehr hell ist. Nie in der Aufnahme."
+                ZEBRA_CLIP -> "Streifen, wo das Bild ausbrennt – dort ist keine Zeichnung mehr."
+                else -> "Streifen ab ${settings.zebra} % Signal."
+            },
+            enabled = true,
+            onSelect = { z -> onChange { it.copy(zebra = z) } },
+        )
+        Setting(
             title = "Verschlusszeit (Shutter)",
             options = shutterOptions(config),
             selected = settings.shutter,
@@ -285,6 +307,12 @@ private fun Info(label: String, value: String) {
         BasicText(label, style = LabelStyle, modifier = Modifier.width(96.dp))
         BasicText(value, style = LabelStyle.copy(color = Color.White))
     }
+}
+
+/** Percent levels only below where the profile clips: Log tops out at about 90 %. */
+private fun zebraOptions(settings: CaptureSettings): List<Int> {
+    val clip = ZebraMeter.clipSignal(settings.colorProfile, settings.matchColors) * 100
+    return listOf(ZEBRA_OFF) + listOf(70, 80, 90).filter { it < clip - 2 } + ZEBRA_CLIP
 }
 
 /** Log needs a tonemap curve in the 10-bit session; until the format is known, offer everything. */

@@ -46,6 +46,9 @@ data class VideoConfig(
     val shutterPriority: Boolean,
     /** Same the other way round: fixed ISO, automatic exposure time. */
     val isoPriority: Boolean,
+    /** Exposure compensation of the camera's AE, in steps of [aeCompensationStep] stops. */
+    val aeCompensationRange: Range<Int>,
+    val aeCompensationStep: Double,
 ) {
     val label: String
         get() = when (format) {
@@ -161,6 +164,8 @@ data class VideoConfig(
                     ?: Range(100_000L, 1_000_000_000L),
                 shutterPriority = CameraMetadata.CONTROL_AE_PRIORITY_MODE_SENSOR_EXPOSURE_TIME_PRIORITY in priorityModes,
                 isoPriority = CameraMetadata.CONTROL_AE_PRIORITY_MODE_SENSOR_SENSITIVITY_PRIORITY in priorityModes,
+                aeCompensationRange = opened.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE) ?: Range(0, 0),
+                aeCompensationStep = opened.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toDouble() ?: 1.0,
             )
         }
 

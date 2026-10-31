@@ -1,5 +1,6 @@
 package com.eddyjunge.latitude.ui
 
+import android.graphics.Bitmap
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.SurfaceHolder
@@ -56,12 +57,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.max
@@ -81,6 +90,8 @@ import com.eddyjunge.latitude.camera.MicSource
 import com.eddyjunge.latitude.camera.SHUTTER_180
 import com.eddyjunge.latitude.camera.SHUTTER_AUTO
 import com.eddyjunge.latitude.camera.VideoConfig
+import com.eddyjunge.latitude.camera.ZebraMask
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 
@@ -143,6 +154,7 @@ fun CameraScreen(
             key(cfg.previewSize) {
                 CameraPreview(camera, Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(cfg.aspectRatio))
             }
+            ZebraOverlay(camera.zebra, Modifier.align(Alignment.Center).fillMaxHeight().aspectRatio(cfg.aspectRatio))
         }
 
         // Tapping the image closes a quick picker.
@@ -645,6 +657,40 @@ private fun LevelMeter(camera: CameraController) {
 
 private val METER_BAR = 7.dp
 private val METER_GAP = 4.dp
+
+/**
+ * Diagonal stripes wherever [ZebraMeter] found the level reached. The mask is coarse (a few
+ * pixels of screen per cell) and drawn smoothed, so its edges are soft rather than blocky.
+ */
+@Composable
+private fun ZebraOverlay(maskFlow: StateFlow<ZebraMask?>, modifier: Modifier) {
+    val mask by maskFlow.collectAsState()
+    val current = mask ?: return
+    val image = remember(current) {
+        val colors = IntArray(current.cells.size) { if (current.cells[it] != 0.toByte()) -1 else 0 }
+        Bitmap.createBitmap(colors, current.width, current.height, Bitmap.Config.ARGB_8888).asImageBitmap()
+    }
+    val density = LocalDensity.current
+    val stripes = remember(density) {
+        val period = with(density) { ZEBRA_PERIOD.toPx() }
+        Brush.linearGradient(
+            0f to Color(0xD9FFFFFF), 0.5f to Color(0xD9FFFFFF), 0.5f to Color(0x99000000), 1f to Color(0x99000000),
+            start = Offset.Zero,
+            end = Offset(period, period),
+            tileMode = TileMode.Repeated,
+        )
+    }
+    Canvas(modifier.graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
+        drawImage(
+            image,
+            dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
+            filterQuality = FilterQuality.Low,
+        )
+        drawRect(stripes, blendMode = BlendMode.SrcIn)
+    }
+}
+
+private val ZEBRA_PERIOD = 9.dp
 
 /** Holds an automatic value. Yellow like a camera's lock indicator. */
 @Composable

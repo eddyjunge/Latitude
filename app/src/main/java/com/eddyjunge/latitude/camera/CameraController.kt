@@ -30,6 +30,7 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 private const val TAG = "CameraController"
 
@@ -128,6 +129,10 @@ class CameraController(context: Context) {
     private var lastToggleAt = 0L
     private var recordWhenReady = false
     private val brightnessLoop = BrightnessLoop(handler)
+    private val zebraMeter = ZebraMeter(handler) { displayRotation() }
+
+    /** Where the viewfinder gets zebra stripes; null while they are off. */
+    val zebra: StateFlow<ZebraMask?> = zebraMeter.mask
 
     /** Automatic white for matched colors; its white point survives lens switches. */
     private val whiteLoop = WhiteBalanceLoop(handler) { applyColor() }
@@ -514,6 +519,7 @@ class CameraController(context: Context) {
         stopRecording()
         brightnessLoop.meter(null)
         whiteLoop.meter(null)
+        zebraMeter.stop()
         repeating = null
         // Released in onClosed: the camera may still deliver until then.
         pacer?.let { it.stop(); retiredPacers += it }
@@ -584,6 +590,11 @@ class CameraController(context: Context) {
         val target = ExposureTarget.of(_settings.value, config)
         // Re-entering the loop starts from what the sensor does then, not from an old scene.
         if (target.mode != AeMode.LOOP) brightnessLoop.reset()
+        // The camera's AE exposes Log like HLG, which is too bright for it (see LOG_OFFSET_STOPS).
+        if (colorProfile == ColorProfile.LOG && (target.mode == AeMode.CAMERA || target.mode == AeMode.PRIORITY)) {
+            val steps = (BrightnessLoop.LOG_OFFSET_STOPS / config.aeCompensationStep).roundToInt()
+            set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, steps.coerceIn(config.aeCompensationRange.lower, config.aeCompensationRange.upper))
+        }
         when (target.mode) {
             AeMode.CAMERA -> set(CaptureRequest.CONTROL_AE_LOCK, locks.ae)
             AeMode.PRIORITY -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
@@ -626,6 +637,7 @@ class CameraController(context: Context) {
         brightnessLoop.meter(previewSurface.takeIf { looping })
         val followLight = matched && _settings.value.whiteBalance == WB_AUTO && !_locks.value.awb && !measuringWhite
         whiteLoop.meter(previewSurface.takeIf { followLight })
+        zebraMeter.meter(previewSurface, _settings.value.zebra, colorProfile, matched, config.aspectRatio)
     }
 
     /** New white from [whiteLoop]: same request, new gains and matrix. */

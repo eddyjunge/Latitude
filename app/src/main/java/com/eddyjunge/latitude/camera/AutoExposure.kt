@@ -189,7 +189,7 @@ internal class BrightnessLoop(private val handler: Handler) {
     private fun adjust(measured: Double) {
         val (target, stopsPerStop) = when (profile) {
             ColorProfile.HLG -> (if (ownCurves) TARGET_HLG_OWN else TARGET_HLG) to 1.0
-            ColorProfile.LOG -> TARGET_LOG to LOG_STOPS_PER_STOP
+            ColorProfile.LOG -> TARGET_LOG * 2.0.pow(LOG_OFFSET_STOPS * LOG_STOPS_PER_STOP) to LOG_STOPS_PER_STOP
             ColorProfile.REC709 -> (if (ownCurves) TARGET_709_OWN else TARGET_709) to 1.0
         }
         val stops = log2(target / measured.coerceAtLeast(1e-4)) / stopsPerStop
@@ -247,6 +247,14 @@ internal class BrightnessLoop(private val handler: Handler) {
          */
         private const val TARGET_LOG = 0.22
         private const val LOG_STOPS_PER_STOP = 0.6
+
+        /**
+         * Log gets this much less light than the camera's AE would give it. Exposed like HLG, a
+         * white wall read 0.75 instead of Apple Log's 0.68, an average room put grey ~2 stops over
+         * the nominal 0.49, and skies and lamps hit the curve's top at 0.91. One stop less keeps
+         * 4 of the 5 stops of headroom; the shadows still have plenty of 10-bit codes.
+         */
+        const val LOG_OFFSET_STOPS = -1.0
 
         /** The camera's AE gives SDR about 0.4 stops less light than HLG; this matches it. */
         private const val TARGET_709 = 0.24
