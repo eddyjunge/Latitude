@@ -42,8 +42,8 @@ run() {
 pull() {
     need_device
     mkdir -p testclips/probe testclips/clips
-    "$ADB" pull /sdcard/Download/Latitude/. testclips/probe/ || true
-    "$ADB" pull /sdcard/Movies/Latitude/. testclips/clips/ || true
+    "$ADB" pull /sdcard/Download/LAT/. testclips/probe/ || true
+    "$ADB" pull /sdcard/Movies/LAT/. testclips/clips/ || true
     ls -la testclips/probe testclips/clips
 }
 

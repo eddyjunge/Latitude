@@ -9,7 +9,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** A pending video file in Movies/Latitude; invisible to other apps until [publish]. */
+/** A pending video file in [FOLDER]; invisible to other apps until [publish]. */
 class VideoOutput private constructor(
     private val context: Context,
     private val uri: Uri,
@@ -29,6 +29,14 @@ class VideoOutput private constructor(
 
     companion object {
         /**
+         * Not "Movies/Latitude": Android 16 returns nothing for any MediaStore query whose
+         * selection contains the text "latitude" (it guards the location columns). Apps that look
+         * a file up by its path, like the Xiaomi gallery, then can't find our clips and can't
+         * delete them.
+         */
+        const val FOLDER = "Movies/LAT"
+
+        /**
          * The profile goes into the name: the file is tagged HLG even in Log (MediaRecorder sets
          * no transfer of its own), so in Resolve the "_LOG" clips get Apple Log assigned by hand.
          */
@@ -42,7 +50,7 @@ class VideoOutput private constructor(
             val values = ContentValues().apply {
                 put(MediaStore.Video.Media.DISPLAY_NAME, name)
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Latitude")
+                put(MediaStore.Video.Media.RELATIVE_PATH, FOLDER)
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
             val resolver = context.contentResolver

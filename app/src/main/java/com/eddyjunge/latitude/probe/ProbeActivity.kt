@@ -44,7 +44,7 @@ import java.util.Locale
 private val Body = TextStyle(color = Color.White, fontSize = 14.sp)
 private val Mono = TextStyle(color = Color(0xCCFFFFFF), fontSize = 12.sp, fontFamily = FontFamily.Monospace)
 
-/** Stage 0: dumps everything the device offers to a JSON file in Download/Latitude. */
+/** Stage 0: dumps everything the device offers to a JSON file in Download/LAT. */
 class ProbeActivity : ComponentActivity() {
     private var status by mutableStateOf("Point the camera at a scene with bright and dark areas, hold still, then start.")
     private var summary by mutableStateOf("")
@@ -110,7 +110,7 @@ class ProbeActivity : ComponentActivity() {
                 report = json
                 savedUri = withContext(Dispatchers.IO) { save(json) }
                 summary = summarize(json)
-                status = "Saved to Download/Latitude. Share it, or pull it via USB later."
+                status = "Saved to Download/LAT. Share it, or pull it via USB later."
             } catch (e: Exception) {
                 status = "Probe failed: $e"
             } finally {
@@ -128,7 +128,7 @@ class ProbeActivity : ComponentActivity() {
                 val json = JSONObject().put("probeVersion", 1).put("createdAt", Date().toString())
                     .put("colorTest", ColorTest(getSystemService(CameraManager::class.java)).run())
                 savedUri = withContext(Dispatchers.IO) { save(json, "color") }
-                status = "Color test saved to Download/Latitude."
+                status = "Color test saved to Download/LAT."
             } catch (e: Exception) {
                 status = "Color test failed: $e"
             } finally {
@@ -167,7 +167,7 @@ class ProbeActivity : ComponentActivity() {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
             put(MediaStore.Downloads.MIME_TYPE, "application/json")
-            put(MediaStore.Downloads.RELATIVE_PATH, "Download/Latitude")
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/LAT")
         }
         val uri = requireNotNull(contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values))
         contentResolver.openOutputStream(uri)!!.use { it.write(json.toString(2).toByteArray()) }

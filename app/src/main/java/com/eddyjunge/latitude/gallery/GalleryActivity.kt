@@ -64,6 +64,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_SURFACE_VIEW
+import com.eddyjunge.latitude.camera.VideoOutput
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -78,7 +79,7 @@ private val Label = TextStyle(
 )
 private val Dim = Label.copy(color = Color(0x99FFFFFF))
 
-/** One recorded clip in Movies/Latitude. */
+/** One recorded clip in [VideoOutput.FOLDER]. */
 data class Clip(
     val uri: Uri,
     val name: String,
@@ -103,8 +104,8 @@ private fun loadClips(context: Context): List<Clip> {
     context.contentResolver.query(
         collection,
         projection,
-        "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?",
-        arrayOf("Movies/Latitude%"),
+        "${MediaStore.Video.Media.RELATIVE_PATH} = ?",
+        arrayOf("${VideoOutput.FOLDER}/"),
         "${MediaStore.Video.Media.DATE_ADDED} DESC",
     )?.use { c ->
         while (c.moveToNext()) {
