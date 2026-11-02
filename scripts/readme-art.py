@@ -146,22 +146,22 @@ def how(t):
         b.append(text(cx, 656, desc[0], 25, t["dim"]))
         b.append(text(cx, 690, desc[1], 25, t["dim"]))
 
-    # 1: phone in landscape, volume key on its top edge, recording.
-    x, y, w, h = 76, 210, 360, 170
-    b.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="30" fill="{t["phone"]}"/>')
-    b.append(f'<rect x="{x + 230}" y="{y - 11}" width="70" height="9" rx="4.5" fill="{t["red"]}"/>')
-    b.append(f'<rect x="{x + 150}" y="{y - 11}" width="40" height="9" rx="4.5" fill="{t["phone"]}"/>')
-    for k, r in enumerate((26, 46)):
-        b.append(f'<path d="M{x + 265 - r} {y - 28 - k * 4} A{r} {r} 0 0 1 {x + 265 + r} {y - 28 - k * 4}" fill="none" '
-                 f'stroke="{t["red"]}" stroke-opacity="{.55 - k * .25}" stroke-width="4" stroke-linecap="round"/>')
-    b.append(f'<rect x="{x + 8}" y="{y + 8}" width="{w - 16}" height="{h - 16}" rx="23" fill="#000"/>')
-    iw = (h - 16) * 4 / 3
-    b.append(flat_landscape(x + (w - iw) / 2, y + 8, iw, h - 16, "s"))
-    b.append(f'<rect x="{x + 125}" y="{y + 18}" width="110" height="26" rx="13" fill="#000" fill-opacity=".45"/>')
-    b.append(f'<circle cx="{x + 140}" cy="{y + 31}" r="4.5" fill="#ff3b30"/>')
-    b.append(text(x + 150, y + 37, "00:00:03", 15, "#fff", 600, "start"))
-    b.append(f'<circle cx="{x + w - 38}" cy="{y + h / 2}" r="17" fill="none" stroke="#fff" stroke-width="3"/>')
-    b.append(f'<rect x="{x + w - 45}" y="{y + h / 2 - 7}" width="14" height="14" rx="3" fill="#ff3b30"/>')
+    # 1: close-up of the phone's edge with the volume key, standby to recording.
+    x, y = 56, 150
+    b.append(f'<rect x="{x}" y="{y}" width="400" height="56" rx="28" fill="{t["phone"]}"/>')
+    b.append(f'<rect x="{x + 70}" y="{y - 16}" width="70" height="20" rx="8" fill="{t["phone"]}"/>')
+    b.append(f'<rect x="{x + 200}" y="{y - 22}" width="130" height="26" rx="10" fill="{t["red"]}"/>')
+    for k, r in enumerate((40, 70)):
+        b.append(f'<path d="M{x + 265 - r} {y - 40 - k * 6} A{r} {r} 0 0 1 {x + 265 + r} {y - 40 - k * 6}" fill="none" '
+                 f'stroke="{t["red"]}" stroke-opacity="{.55 - k * .25}" stroke-width="5" stroke-linecap="round"/>')
+    cy = y + 170
+    b.append(f'<rect x="{x + 10}" y="{cy}" width="160" height="56" rx="28" fill="none" stroke="{t["dim"]}" stroke-width="2.5"/>')
+    b.append(text(x + 90, cy + 37, "STANDBY", 20, t["dim"], 600, spacing=1))
+    b.append(f'<path d="M{x + 186} {cy + 28} h36 m-10 -9 l10 9 l-10 9" fill="none" stroke="{t["dim"]}" stroke-width="3" '
+             f'stroke-linecap="round" stroke-linejoin="round"/>')
+    b.append(f'<rect x="{x + 238}" y="{cy}" width="152" height="56" rx="28" fill="{t["red"]}"/>')
+    b.append(f'<circle cx="{x + 270}" cy="{cy + 28}" r="8" fill="#fff"/>')
+    b.append(text(x + 330, cy + 37, "REC", 22, "#fff", 700, spacing=1))
 
     # 2: Resolve's metadata for the clip.
     x, y = 544 + 56, 70
