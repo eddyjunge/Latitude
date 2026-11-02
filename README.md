@@ -43,7 +43,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/principles-dark.svg">
-    <img src="assets/principles-light.svg" width="100%" alt="Ready instantly: opens straight into a record-ready preview, volume buttons start and stop. Nothing moves mid-clip: exposure, white balance and focus lock on record. Constant frame rate: 24 to 60p, default 25p. No baked-in look: no sharpening, no LUT, no AI.">
+    <img src="assets/principles-light.svg" width="100%" alt="Ready instantly: opens straight into a record-ready preview, volume buttons start and stop. Nothing moves mid-clip: exposure, white balance and focus lock on record. Constant frame rate: 30p, stored as 29.97 like DJI and Sony do. No baked-in look: no sharpening, no LUT, no AI.">
   </picture>
 </p>
 
@@ -62,16 +62,17 @@
 
 | Stage | What | Status |
 | :--- | :--- | :--- |
-| 0 | Capability probe: what the camera, ISP and encoder really offer | Built, waiting for the first device run |
-| 1 | Clean HLG 10-bit with exposure, white balance and focus locked | Foundations built |
-| 2 | Apple Log through the ISP tone curve | Decided by the probe |
+| 0 | Capability probe: what the camera, ISP and encoder really offer | Done |
+| 1 | Clean HLG 10-bit with exposure, white balance and focus locked | Done |
+| 2 | Apple Log through the ISP tone curve, tagged so Resolve picks it up | Done |
 | 3 | RAW to Apple Log on the GPU | Parked |
 
 </div>
 
 <p align="center">
   <b>Working today:</b> instant-start pipeline, volume-button recording, AE · AWB · AF lock,<br>
-  4K HEVC 10-bit HLG at 25p, minimal noise reduction and no sharpening, thermal warning.
+  open gate 4096×3072 HEVC 10-bit at 150 Mbit/s, Apple Log · HLG · Rec.709, matched colors on every lens,<br>
+  24-bit PCM sound (Resolve on Linux decodes no AAC), crash-safe files, zebras, thermal warning.
 </p>
 
 <br>
@@ -89,7 +90,7 @@ scripts/phone.sh       # build the optimized app, install it and show the startu
 scripts/phone.sh pull  # copy probe results and test clips into testclips/
 ```
 
-<p align="center"><sub>In DaVinci Resolve, set the clip’s Input Color Space to <b>Apple Log</b>. HLG clips are detected automatically.</sub></p>
+<p align="center"><sub>DaVinci Resolve picks the input color space by itself: <b>Apple Log</b>, Rec.2100 HLG or Rec.709.</sub></p>
 
 <br>
 <br>

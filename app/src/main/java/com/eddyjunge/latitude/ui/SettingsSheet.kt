@@ -235,10 +235,12 @@ internal fun SettingsSheet(
                 selected = settings.micProcessing,
                 label = { if (it == MicProcessing.STANDARD) "Automatisch" else "Unbearbeitet" },
                 description = when (settings.micProcessing) {
-                    MicProcessing.STANDARD -> "Das Handy filtert Rauschen und regelt die Lautstärke – gut, " +
-                        "wenn der Ton ohne Nachbearbeitung passen soll."
-                    MicProcessing.RAW -> "Rohes Mikrofonsignal ohne Filter und Pegelautomatik. Klingt natürlicher, " +
-                        "ist aber leiser – im Schnitt lauter machen."
+                    // Measured on the 15 Ultra's internal mics: CAMCORDER is real 24-bit stereo,
+                    // UNPROCESSED mono in both channels with 16-bit precision, ~10 dB quieter.
+                    MicProcessing.STANDARD -> "Stereo in 24 Bit mit der Abstimmung der Handy-Kamera. " +
+                        "Für fast alles die beste Wahl."
+                    MicProcessing.RAW -> "Ganz ohne Filter. Das eingebaute Mikrofon liefert so aber nur Mono " +
+                        "und ist rund 10 dB leiser – eher für externe Mikros."
                 },
                 enabled = canChangeAudio,
                 onSelect = { p -> onChange { it.copy(micProcessing = p) } },

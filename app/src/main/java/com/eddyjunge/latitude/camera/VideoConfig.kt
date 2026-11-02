@@ -62,8 +62,8 @@ data class VideoConfig(
     val frameDurationNs: Long get() = 1_000_000_000L / fps
 
     companion object {
-        /** 25p first: matches 50 Hz mains lighting in Europe. */
-        private val PREFERRED_FPS = listOf(25, 30)
+        /** 30p on every lens: what the user shoots on all cameras and posts to social media. */
+        private val PREFERRED_FPS = listOf(30)
         private const val BITRATE_4K = 120_000_000
 
         /** The SM8750 HEVC encoder tops out at 160 Mbit/s; stay clear of the edge. */
