@@ -69,71 +69,15 @@ def flat_landscape(x, y, w, h, uid):
 # --- hero ---------------------------------------------------------------------------------
 
 def hero(t):
-    W, H = 1600, 1000
+    W, H = 1600, 400
     b = [
         text(800, 110, "Latitude", 34, t["red"], 600, spacing=-0.3),
         text(800, 228, "Room to grade.", 112, t["text"], 700, spacing=-3.4),
         text(800, 300, "A camera app for Android that records footage", 40, t["dim"], spacing=-0.4),
         text(800, 352, "built for DaVinci Resolve.", 40, t["dim"], spacing=-0.4),
     ]
-    # Phone in landscape, the app as it looks mid-take (Xiaomi 15 Ultra, 2400 × 1080).
-    px, py, pw, ph = 330, 450, 940, 440
-    b.append(f'<rect x="{px}" y="{py}" width="{pw}" height="{ph}" rx="64" fill="{t["phone"]}"/>')
-    b.append(f'<rect x="{px + 10}" y="{py + 10}" width="{pw - 20}" height="{ph - 20}" rx="56" fill="#000"/>')
-    sx, sy, sw, sh = px + 22, py + 22, pw - 44, ph - 44  # screen
-    iw = sh * 4 / 3  # open gate 4:3 fills the height
-    ix = sx + (sw - iw) / 2
-    b.append(f'<clipPath id="scr"><rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" rx="44"/></clipPath>')
-    b.append('<g clip-path="url(#scr)">')
-    b.append(f'<rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" fill="#000"/>')
-    b.append(flat_landscape(ix, sy, iw, sh, "h"))
-    # Top readout: timer, frame rate, profile, shutter, ISO.
-    pill_w = 430
-    pxl = sx + sw / 2 - pill_w / 2
-    b.append(f'<rect x="{pxl}" y="{sy + 14}" width="{pill_w}" height="40" rx="20" fill="#000" fill-opacity=".45"/>')
-    b.append(f'<circle cx="{pxl + 24}" cy="{sy + 34}" r="5.5" fill="#ff3b30"/>')
-    b.append(text(pxl + 38, sy + 41, "00:00:12", 18, "#fff", 600, "start"))
-    b.append(text(pxl + 130, sy + 41, "30p", 18, "#fff", 600, "start"))
-    b.append(text(pxl + 180, sy + 41, "LOG", 18, "#fff", 600, "start"))
-    b.append(text(pxl + 236, sy + 41, "1/60", 18, "#fff", 600, "start"))
-    b.append(text(pxl + 280, sy + 41, "180°", 13, "#fff", 500, "start", opacity=.6))
-    b.append(text(pxl + 330, sy + 41, "ISO", 13, "#fff", 500, "start", opacity=.6))
-    b.append(text(pxl + 358, sy + 41, "400", 18, "#fff", 600, "start"))
-    # Left rail: settings, sound meter, locks (yellow: locked for the take).
-    lx = sx + (ix - sx) / 2
-    b.append(f'<circle cx="{lx}" cy="{sy + 44}" r="22" fill="#fff" fill-opacity=".14"/>')
-    b.append(f'<circle cx="{lx}" cy="{sy + 44}" r="7" fill="none" stroke="#fff" stroke-width="2.5"/>')
-    for i, level in enumerate((0.62, 0.55)):
-        bx = lx - 7 + i * 10
-        top, bottom = sy + 86, sy + 186
-        b.append(f'<rect x="{bx}" y="{top}" width="5" height="{bottom - top}" rx="2.5" fill="#fff" fill-opacity=".2"/>')
-        b.append(f'<rect x="{bx}" y="{bottom - (bottom - top) * level}" width="5" height="{(bottom - top) * level}" rx="2.5" fill="#fff" fill-opacity=".9"/>')
-    for i, name in enumerate(("AE", "AWB", "AF")):
-        cy = sy + sh - 118 + i * 38
-        b.append(f'<rect x="{lx - 34}" y="{cy}" width="68" height="30" rx="15" fill="#ffd60a" fill-opacity=".2"/>')
-        b.append(text(lx, cy + 20, name, 13, "#ffd60a", 700, spacing=.4))
-    # Right rail: lenses, record button.
-    rx = ix + iw + (sx + sw - ix - iw) / 2
-    for i, name in enumerate(("14mm", "23mm", "69mm", "95mm")):
-        cy = sy + 18 + i * 36
-        if name == "23mm":
-            b.append(f'<rect x="{rx - 38}" y="{cy}" width="76" height="30" rx="15" fill="#fff" fill-opacity=".2"/>')
-        b.append(text(rx, cy + 20, name, 14, "#fff" if name == "23mm" else "#9a9a9a", 600))
-    rcy = sy + sh / 2 + 52
-    b.append(f'<circle cx="{rx}" cy="{rcy}" r="33" fill="none" stroke="#fff" stroke-width="4"/>')
-    b.append(f'<rect x="{rx - 14}" y="{rcy - 14}" width="28" height="28" rx="6" fill="#ff3b30"/>')
-    b.append('</g>')
-    # Callouts beside the phone.
-    for x, anchor, cap, value, sub in (
-        (300, "end", "Record-ready", "0.3 s", "After launch"),
-        (1300, "start", "Recorded as", "Apple Log", "10-bit · Rec.2020"),
-    ):
-        b.append(text(x, 612, cap, 24, t["dim"], 500, anchor))
-        b.append(text(x, 666, value, 50, t["text"], 700, anchor, -1.2))
-        b.append(text(x, 700, sub, 22, t["dim"], 400, anchor))
     return svg(W, H, "Latitude. Room to grade. A camera app for Android that records footage built for "
-                     "DaVinci Resolve. Record-ready 0.3 seconds after launch, recorded as 10-bit Apple Log.",
-               "".join(b))
+                     "DaVinci Resolve.", "".join(b))
 
 
 # --- why ----------------------------------------------------------------------------------
@@ -145,9 +89,9 @@ def why(t):
         x0 = side * 816
         b.append(card(x0, 0, 784, H, t))
         cap = ("Typical phone video", "With Latitude")[side]
-        title = ("The look is baked in.", "The grade is yours.")[side]
-        foot = ("Contrast, sharpening and clipped highlights, fixed in the file",
-                "A flat Apple Log image with the highlights still there")[side]
+        title = ("Finished in the phone.", "Finished in Resolve.")[side]
+        foot = ("Contrast, sharpening and clipped highlights are in the file",
+                "Flat Apple Log, the highlights are still in the file")[side]
         b.append(text(x0 + 392, 70, cap, 26, t["red"] if side else t["dim"], 500))
         b.append(text(x0 + 392, 120, title, 44, t["text"], 700, spacing=-0.8))
         # Tone curve: scene brightness in stops (x) to signal (y).
@@ -177,9 +121,9 @@ def why(t):
         b.append(text(gx, gy + gh + 34, "Shadows", 20, t["dim"], 400, "start"))
         b.append(text(gx + gw, gy + gh + 34, "Highlights", 20, t["dim"], 400, "end"))
         b.append(text(x0 + 392, H - 40, foot, 24, t["dim"]))
-    return svg(W, H, "Typical phone video: the look is baked in, with contrast, sharpening and clipped "
-                     "highlights fixed in the file. With Latitude: the grade is yours, a flat Apple Log "
-                     "image with the highlights still there.", "".join(b))
+    return svg(W, H, "Typical phone video: finished in the phone, contrast, sharpening and clipped "
+                     "highlights are in the file. With Latitude: finished in Resolve, flat Apple Log with the "
+                     "highlights still in the file.", "".join(b))
 
 
 # --- how it works -------------------------------------------------------------------------
@@ -188,9 +132,9 @@ def how(t):
     W, H = 1600, 760
     b = []
     steps = (
-        ("Press a volume key.", ("Recording starts at once,", "even from standby.")),
-        ("Import into Resolve.", ("Apple Log, lens, exposure and", "timecode are already filled in.")),
-        ("Grade with the rest.", ("One color-managed timeline", "with your other cameras.")),
+        ("Press a volume key.", ("Starts recording, also when", "the app is in standby.")),
+        ("Import into Resolve.", ("Resolve reads Apple Log, lens,", "exposure and timecode from the file.")),
+        ("Grade it.", ("Same color-managed timeline", "as your Sony and DJI clips.")),
     )
     for i, (title, desc) in enumerate(steps):
         x0 = i * 544
@@ -244,9 +188,9 @@ def how(t):
                  f'fill="{t["red"] if ours else t["faint"]}"/>')
         b.append(text(x + start + 16, cy + 35, name, 17, "#fff" if ours else t["text"], 600, "start"))
     b.append(text(x + 210, y + 300, "DaVinci Wide Gamut", 22, t["dim"], 500))
-    return svg(W, H, "How it works: 1. Press a volume key, recording starts at once, even from standby. "
-                     "2. Import into Resolve, Apple Log, lens, exposure and timecode are already filled in. "
-                     "3. Grade with the rest, one color-managed timeline with your other cameras.", "".join(b))
+    return svg(W, H, "1. Press a volume key: starts recording, also when the app is in standby. "
+                     "2. Import into Resolve: Resolve reads Apple Log, lens, exposure and timecode from the file. "
+                     "3. Grade it: same color-managed timeline as your Sony and DJI clips.", "".join(b))
 
 
 # --- pipeline -----------------------------------------------------------------------------
@@ -256,7 +200,7 @@ def pipeline(t):
     steps = (("01", "Locked capture", "ISO · shutter · WB · focus"),
              ("02", "Apple Log", "Rec.2020 · 10-bit HEVC"),
              ("03", "DaVinci Resolve", "Input: Apple Log"),
-             ("04", "Wide Gamut", "Your look, unchanged"))
+             ("04", "Wide Gamut", "With your other cameras"))
     b = []
     cw, gap = 352, 64
     for i, (num, title, sub) in enumerate(steps):
@@ -270,9 +214,9 @@ def pipeline(t):
             ax = x0 + cw + 14
             b.append(f'<path d="M{ax} 100 h36 m-10 -9 l10 9 l-10 9" fill="none" stroke="{t["dim"]}" stroke-opacity=".6" '
                      f'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>')
-    b.append(text(800, 262, "Resolve picks Apple Log by itself. No LUT, no DRT wrapping, no custom transform.", 22, t["dim"]))
-    return svg(W, H, "Locked capture, recorded as Apple Log in Rec.2020 and 10-bit HEVC, recognized as Apple Log "
-                     "by DaVinci Resolve, lands in DaVinci Wide Gamut with your look unchanged.", "".join(b))
+    b.append(text(800, 262, "Resolve sets Apple Log on import. No LUT, no manual tagging.", 22, t["dim"]))
+    return svg(W, H, "Locked capture, recorded as Apple Log in Rec.2020 and 10-bit HEVC, set as Apple Log by "
+                     "DaVinci Resolve on import, graded in DaVinci Wide Gamut with your other cameras.", "".join(b))
 
 
 # --- principles ---------------------------------------------------------------------------
@@ -280,10 +224,10 @@ def pipeline(t):
 def principles(t):
     W, H = 1600, 664
     items = (
-        ("rec", "Ready instantly.", ("Opens straight into a live,", "record-ready preview.", "Volume buttons start and stop.")),
-        ("lock", "Nothing moves mid-clip.", ("Exposure, white balance and", "focus lock the moment", "you press record.")),
-        ("cfr", "Constant frame rate.", ("30p, stored as 29.97 like DJI", "and Sony do. Never variable,", "because Resolve hates VFR.")),
-        ("curve", "No baked-in look.", ("No sharpening, no LUT,", "no AI. Just the image,", "ready for your grade.")),
+        ("rec", "Ready on launch.", ("Opens with the camera running.", "The volume buttons start", "and stop a take.")),
+        ("lock", "Locked during a take.", ("Exposure, white balance and", "focus don’t change", "while recording.")),
+        ("cfr", "Constant frame rate.", ("30p, stored as 29.97 like", "DJI and Sony. Resolve handles", "variable frame rate badly.")),
+        ("curve", "No processing look.", ("No sharpening, no LUT,", "no AI enhancement.", "")),
     )
     b = []
     for i, (icon, title, lines) in enumerate(items):
@@ -305,10 +249,10 @@ def principles(t):
         b.append(text(x0 + 40, y0 + 165, title, 40, t["text"], 700, "start", -0.8))
         for k, line in enumerate(lines):
             b.append(text(x0 + 40, y0 + 210 + k * 32, line, 25, t["dim"], 400, "start"))
-    return svg(W, H, "Ready instantly: opens straight into a record-ready preview, volume buttons start and stop. "
-                     "Nothing moves mid-clip: exposure, white balance and focus lock on record. Constant frame "
-                     "rate: 30p, stored as 29.97 like DJI and Sony do. No baked-in look: no sharpening, no LUT, no AI.",
-               "".join(b))
+    return svg(W, H, "Ready on launch: opens with the camera running, the volume buttons start and stop a take. "
+                     "Locked during a take: exposure, white balance and focus don't change while recording. "
+                     "Constant frame rate: 30p, stored as 29.97 like DJI and Sony. No processing look: no "
+                     "sharpening, no LUT, no AI enhancement.", "".join(b))
 
 
 # --- measured -----------------------------------------------------------------------------
