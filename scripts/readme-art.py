@@ -273,6 +273,25 @@ def measured(t):
                      "within one frame, no frames dropped at a strict 29.97.", "".join(b))
 
 
+# --- smooth and light -------------------------------------------------------------------
+
+def smooth(t):
+    W, H = 1600, 380
+    items = (("33 ms", "Between viewfinder frames", "Re-timed to the sensor"),
+             ("90 s", "Idle, then standby", "The camera switches off"),
+             ("0.6 s", "Standby to recording", "Volume key wakes it up"))
+    b = []
+    for i, (value, title, sub) in enumerate(items):
+        x0 = i * 544
+        b.append(card(x0, 0, 512, H, t))
+        b.append(text(x0 + 256, 168, value, 96, t["text"], 700, spacing=-3))
+        b.append(text(x0 + 256, 248, title, 36, t["text"], 600, spacing=-0.5))
+        b.append(text(x0 + 256, 298, sub, 28, t["dim"]))
+    return svg(W, H, "33 milliseconds between viewfinder frames, re-timed to the sensor. After 90 seconds idle "
+                     "the camera switches off. 0.6 seconds from standby to recording, the volume key wakes it up.",
+               "".join(b))
+
+
 # --- wordmark -----------------------------------------------------------------------------
 
 def wordmark(t):
@@ -284,7 +303,7 @@ def wordmark(t):
 
 def main():
     for name, draw in (("hero", hero), ("why", why), ("how-it-works", how), ("pipeline", pipeline),
-                       ("principles", principles), ("measured", measured), ("wordmark", wordmark)):
+                       ("principles", principles), ("measured", measured), ("smooth", smooth), ("wordmark", wordmark)):
         for theme, colors in THEMES.items():
             (ASSETS / f"{name}-{theme}.svg").write_text(draw(colors))
 
