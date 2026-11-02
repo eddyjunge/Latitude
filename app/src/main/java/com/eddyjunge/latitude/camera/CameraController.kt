@@ -41,6 +41,12 @@ private const val TOGGLE_DEBOUNCE_MS = 600L
 private const val MIN_WHITE_FRAMES = 8
 private const val MAX_WHITE_FRAMES = 20
 
+/** Longest wait at stop for frames still on their way to the encoder (~5 frames are in flight). */
+private const val DRAIN_TIMEOUT_MS = 500L
+
+/** Longest wait for the last take to let go of the encoder before a new one may use it. */
+private const val FINALIZE_TIMEOUT_MS = 3000L
+
 
 sealed interface CameraState {
     data object Idle : CameraState
@@ -67,6 +73,13 @@ class CameraController(context: Context) {
     private val thread = HandlerThread("camera", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
     private val handler = Handler(thread.looper)
     private val executor = Executor { handler.post(it) }
+
+    /**
+     * Finishes stopped takes: MediaRecorder.stop(), the range patch and publishing take about
+     * half a second, and on the camera thread they would freeze the viewfinder meanwhile.
+     */
+    private val finisher = HandlerThread("finisher").apply { start() }
+    private val finisherHandler = Handler(finisher.looper)
 
     private val _state = MutableStateFlow<CameraState>(CameraState.Idle)
     val state: StateFlow<CameraState> = _state.asStateFlow()
@@ -125,6 +138,8 @@ class CameraController(context: Context) {
     private var lastFocusDistance: Float? = null
     private var lastExposureUpdate = 0L
     private var startupLogged = false
+    /** When the camera was asked to open, e.g. back from the gallery; 0 once it is live. */
+    private var openRequestedAt = 0L
     private var recording: ActiveRecording? = null
     private var lastToggleAt = 0L
     private var recordWhenReady = false
@@ -142,6 +157,17 @@ class CameraController(context: Context) {
     private var repeating: CaptureRequest.Builder? = null
 
     private class ActiveRecording(val recorder: MediaRecorder, val output: VideoOutput)
+
+    /** Sequence id of the latest repeating request; at stop, the last one that fed the encoder. */
+    private var lastSequence = -1
+
+    /** A stopped take waiting for the camera to finish the frames already meant for its encoder. */
+    private var finishing: ActiveRecording? = null
+    private var drainSequence = -1
+    private var drainStartedAt = 0L
+
+    /** Counted down once the take handed to [finisher] has let go of the encoder surface. */
+    private var finalizing: CountDownLatch? = null
 
     private val tenBit
         get() = tenBitAllowed && _config.value?.hlgSupported == true && _settings.value.colorProfile.tenBit
@@ -232,6 +258,7 @@ class CameraController(context: Context) {
             }
 
             closeSession()
+            awaitFinalized()
             recorderSurface?.release()
             recorderSurface = null
             val old = _config.value
@@ -253,6 +280,7 @@ class CameraController(context: Context) {
 
     fun open() {
         handler.post {
+            if (!wantOpen) openRequestedAt = SystemClock.elapsedRealtime()
             wantOpen = true
             audioInput.route(_settings.value.mic, active = true)
             openInternal()
@@ -290,9 +318,11 @@ class CameraController(context: Context) {
             closeInternal()
             meter.stop()
             audioInput.release()
+            awaitFinalized()
             recorderSurface?.release()
             recorderSurface = null
             thread.quitSafely()
+            finisher.quitSafely()
         }
     }
 
@@ -494,6 +524,7 @@ class CameraController(context: Context) {
                 } else if (tenBit) {
                     Log.w(TAG, "HLG10 session rejected, retrying in 8-bit")
                     tenBitAllowed = false
+                    awaitFinalized()
                     recorderSurface?.release()
                     recorderSurface = null
                     createSessionIfReady()
@@ -516,7 +547,8 @@ class CameraController(context: Context) {
     }
 
     private fun closeSession() {
-        stopRecording()
+        stopRecording(drain = false)
+        finishTake()
         brightnessLoop.meter(null)
         whiteLoop.meter(null)
         zebraMeter.stop()
@@ -628,7 +660,7 @@ class CameraController(context: Context) {
         val targets = listOfNotNull(pacer?.input ?: previewSurface, recorderSurface.takeIf { recording != null || startingRecording })
         if (targets.isEmpty()) return
         val builder = buildRequest(dev, targets)
-        s.setRepeatingRequest(builder.build(), captureCallback, handler)
+        lastSequence = s.setRepeatingRequest(builder.build(), captureCallback, handler)
         repeating = builder
         val config = _config.value ?: return
         val looping = ExposureTarget.of(_settings.value, config).mode == AeMode.LOOP && !_locks.value.ae
@@ -647,7 +679,7 @@ class CameraController(context: Context) {
         val correction = colorCorrection(_config.value ?: return) ?: return
         builder.set(CaptureRequest.COLOR_CORRECTION_GAINS, correction.gains)
         builder.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, correction.transform)
-        runCatching { s.setRepeatingRequest(builder.build(), captureCallback, handler) }
+        runCatching { lastSequence = s.setRepeatingRequest(builder.build(), captureCallback, handler) }
     }
 
     /**
@@ -676,10 +708,18 @@ class CameraController(context: Context) {
         if (builder[CaptureRequest.SENSOR_EXPOSURE_TIME] == ns && builder[CaptureRequest.SENSOR_SENSITIVITY] == iso) return
         builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, ns)
         builder.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
-        runCatching { s.setRepeatingRequest(builder.build(), captureCallback, handler) }
+        runCatching { lastSequence = s.setRepeatingRequest(builder.build(), captureCallback, handler) }
     }
 
     private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureSequenceCompleted(s: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
+            if (sequenceId == drainSequence) finishTake()
+        }
+
+        override fun onCaptureSequenceAborted(s: CameraCaptureSession, sequenceId: Int) {
+            if (sequenceId == drainSequence) finishTake()
+        }
+
         override fun onCaptureCompleted(s: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
             if (s === session && measuringWhite) takeFirstWhite(result)
             // While locked, keep the distance focus was pinned to rather than the lens readout.
@@ -703,15 +743,20 @@ class CameraController(context: Context) {
 
     /** Time from process start to a live, record-ready preview (adb logcat -s CameraController). */
     private fun logStartupTime() {
+        val now = SystemClock.elapsedRealtime()
+        if (openRequestedAt > 0) Log.i(TAG, "record-ready ${now - openRequestedAt} ms after open")
+        openRequestedAt = 0
         if (startupLogged) return
         startupLogged = true
-        Log.i(TAG, "record-ready ${SystemClock.elapsedRealtime() - Process.getStartElapsedRealtime()} ms after process start")
+        Log.i(TAG, "record-ready ${now - Process.getStartElapsedRealtime()} ms after process start")
     }
 
     private var startingRecording = false
 
     private fun startRecording() {
         if (session == null || previewSurface == null) return
+        // Pressed again right after a stop: the last take must let go of the encoder first.
+        awaitFinalized()
         val encoder = recorderSurface ?: return
         val config = _config.value ?: return
 
@@ -768,12 +813,57 @@ class CameraController(context: Context) {
         _state.value = CameraState.Recording(formatLabel, SystemClock.elapsedRealtime())
     }
 
-    private fun stopRecording() {
+    /**
+     * Stops feeding the encoder, then finalizes the file once the camera has delivered the
+     * frames it already had in flight for it (~150 ms). Stopping the encoder before that leaves
+     * them queued in the persistent surface for the next take's encoder; suspected cause of a
+     * take started 1.5 s after the last one whose first GOP was undecodable (green).
+     * The button turns back at once; the file is finished in the background.
+     * [drain] false finalizes at once, for a closing session.
+     */
+    private fun stopRecording(drain: Boolean = true) {
         val active = recording ?: return
         recording = null
-        // Stop feeding the encoder first, then finalize the file.
-        runCatching { setRepeating() }
+        val fed = lastSequence
+        val replaced = runCatching { setRepeating() }.isSuccess
         if (meter.following) meter.stop()
+        finishing = active
+        _state.value = if (session != null) CameraState.Ready(formatLabel) else CameraState.Opening
+        if (drain && replaced && fed >= 0) {
+            drainSequence = fed
+            drainStartedAt = SystemClock.elapsedRealtime()
+            handler.postDelayed(::finishTake, finishTakeToken, DRAIN_TIMEOUT_MS)
+        } else {
+            finishTake()
+        }
+    }
+
+    private val finishTakeToken = Any()
+
+    /** Camera thread. The drained take goes to [finisher]. */
+    private fun finishTake() {
+        handler.removeCallbacksAndMessages(finishTakeToken)
+        val drained = drainSequence >= 0
+        drainSequence = -1
+        val active = finishing ?: return
+        finishing = null
+        if (drained) Log.i(TAG, "encoder drained after ${SystemClock.elapsedRealtime() - drainStartedAt} ms")
+        val done = CountDownLatch(1)
+        finalizing = done
+        finisherHandler.post {
+            val started = SystemClock.elapsedRealtime()
+            finalize(active)
+            Log.i(TAG, "take finalized in ${SystemClock.elapsedRealtime() - started} ms")
+            done.countDown()
+            handler.post {
+                if (finalizing === done) finalizing = null
+                updateMeter()
+            }
+        }
+    }
+
+    /** Finisher thread. Only this thread touches the recorder once it is handed over. */
+    private fun finalize(active: ActiveRecording) {
         val stopped = runCatching { active.recorder.stop() }
             .onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }
             .isSuccess
@@ -781,12 +871,21 @@ class CameraController(context: Context) {
         if (stopped) {
             runCatching { FullRange.mark(active.output.fd.fileDescriptor) }
                 .onFailure { Log.w(TAG, "range tag not fixed", it) }
-            active.output.publish()
+            runCatching { active.output.publish() }.onFailure { Log.e(TAG, "publish failed", it) }
         } else {
-            active.output.discard()
+            runCatching { active.output.discard() }
         }
-        _state.value = if (session != null) CameraState.Ready(formatLabel) else CameraState.Opening
-        updateMeter()
+    }
+
+    /**
+     * Camera thread. Blocks until the last take has released the encoder surface, before that
+     * surface gets a new recorder or is released. Only a stop right before costs any time.
+     */
+    private fun awaitFinalized() {
+        finishTake()
+        val done = finalizing ?: return
+        if (!done.await(FINALIZE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) Log.w(TAG, "last take still finalizing")
+        finalizing = null
     }
 
     /**
@@ -794,7 +893,8 @@ class CameraController(context: Context) {
      * Left alone during a take so the recording's input is never touched.
      */
     private fun updateMeter() {
-        if (recording != null) return
+        // The mic stays the recorder's until it is stopped.
+        if (recording != null || finishing != null || finalizing != null) return
         val s = _settings.value
         meter.meter(if (wantOpen) audioInput.choose(s.mic, s.micProcessing) else null)
     }

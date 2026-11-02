@@ -3,9 +3,12 @@ package com.eddyjunge.latitude.gallery
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.LruCache
 import android.util.Size
@@ -162,9 +165,24 @@ class GalleryActivity : ComponentActivity() {
         }
     }
 
+    /** A take stopped just before opening is still being finished; it shows up once published. */
+    private val changes = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) = reload()
+    }
+
     override fun onStart() {
         super.onStart()
+        contentResolver.registerContentObserver(
+            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            true,
+            changes,
+        )
         reload()
+    }
+
+    override fun onStop() {
+        contentResolver.unregisterContentObserver(changes)
+        super.onStop()
     }
 
     /** The MediaStore query runs off the main thread so the grid opens without a hitch. */
