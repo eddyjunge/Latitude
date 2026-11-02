@@ -7,8 +7,9 @@
 The phone writes 8-bit Rec.709 full range but 10-bit HLG/Log limited range. Clips from
 2026-10-31 16:28 until the fix were all tagged full, so in Resolve 10-bit Log shows lifted
 blacks and highlights ~0.7 stops too dark; older 8-bit clips say limited and get ~17 % extra
-contrast. Sets the two flags (see FullRange.kt): the 'colr' box and video_full_range_flag in the
-HEVC SPS. Picture data is untouched; files that are already right are skipped.
+contrast. Sets the two flags: the 'colr' box and video_full_range_flag in the
+HEVC SPS (Take.kt writes the same for new clips). Picture data is untouched; files that are
+already right are skipped.
 """
 import struct
 import sys

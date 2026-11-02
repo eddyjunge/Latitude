@@ -13,7 +13,6 @@ import android.hardware.camera2.params.DynamicRangeProfiles
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -26,7 +25,6 @@ import android.view.Surface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
@@ -46,6 +44,10 @@ private const val DRAIN_TIMEOUT_MS = 500L
 
 /** Longest wait for the last take to let go of the encoder before a new one may use it. */
 private const val FINALIZE_TIMEOUT_MS = 3000L
+
+/** Crash recovery runs once per process; a second controller must not publish a running take. */
+@Volatile
+private var recovered = false
 
 
 sealed interface CameraState {
@@ -75,7 +77,7 @@ class CameraController(context: Context) {
     private val executor = Executor { handler.post(it) }
 
     /**
-     * Finishes stopped takes: MediaRecorder.stop(), the range patch and publishing take about
+     * Finishes stopped takes: draining the encoder, writing the index and publishing take about
      * half a second, and on the camera thread they would freeze the viewfinder meanwhile.
      */
     private val finisher = HandlerThread("finisher").apply { start() }
@@ -97,12 +99,12 @@ class CameraController(context: Context) {
 
     // Before audioInput: its device callback can run updateMeter() on the camera thread while
     // this constructor is still running.
-    private val meter = AudioMeter()
+    private val capture = AudioCapture()
 
     val audioInput = AudioInput(appContext, handler) { handler.post { updateMeter() } }
 
     /** Live mic level per channel; null while the mic is off or the camera is closed. */
-    val audioLevels: StateFlow<List<ChannelLevel>?> = meter.levels
+    val audioLevels: StateFlow<List<ChannelLevel>?> = capture.levels
 
     /** Active format; null until resolved. The preview surface must match its preview size. */
     private val _config = MutableStateFlow<VideoConfig?>(null)
@@ -136,6 +138,13 @@ class CameraController(context: Context) {
     private var eisAllowed = true
     private var hevcLevel: Int? = null
     private var lastFocusDistance: Float? = null
+    /**
+     * Real frame period from the sensor's timestamps, the take's first guess for how much audio
+     * belongs to one frame. SENSOR_FRAME_DURATION only echoes the request (33.333 ms); the main
+     * lens delivers a frame every 33.27 ms.
+     */
+    private var framePeriodNs = 0.0
+    private var lastSensorTimestamp = 0L
     private var lastExposureUpdate = 0L
     private var startupLogged = false
     /** When the camera was asked to open, e.g. back from the gallery; 0 once it is live. */
@@ -156,8 +165,7 @@ class CameraController(context: Context) {
     /** The request currently repeating, kept so the exposure glide only touches two values. */
     private var repeating: CaptureRequest.Builder? = null
 
-    /** [fullRange]: the 8-bit stream comes full range; MediaRecorder tags every file limited. */
-    private class ActiveRecording(val recorder: MediaRecorder, val output: VideoOutput, val fullRange: Boolean)
+    private class ActiveRecording(val take: Take, val output: VideoOutput)
 
     /** Sequence id of the latest repeating request; at stop, the last one that fed the encoder. */
     private var lastSequence = -1
@@ -209,6 +217,10 @@ class CameraController(context: Context) {
 
     init {
         handler.post { resolveConfig() }
+        if (!recovered) {
+            recovered = true
+            finisherHandler.post { VideoOutput.recoverPending(appContext) }
+        }
     }
 
     /** Camera thread. Picks the saved lens (or the main one) and resolves its format. */
@@ -317,7 +329,7 @@ class CameraController(context: Context) {
         handler.post {
             wantOpen = false
             closeInternal()
-            meter.stop()
+            capture.stop()
             audioInput.release()
             awaitFinalized()
             recorderSurface?.release()
@@ -425,33 +437,29 @@ class CameraController(context: Context) {
     }
 
     /**
-     * The persistent surface must be backed by a prepared encoder once before the camera
-     * may use it, so we prepare and immediately release a throwaway recorder.
+     * The persistent surface must be backed by a configured encoder once before the camera
+     * may use it, so a throwaway encoder is configured on it and released. That also finds the
+     * HEVC level the encoder accepts for this size.
      */
     private fun ensureRecorderSurface(): Surface? {
         recorderSurface?.let { return it }
         val config = _config.value ?: return null
-        val candidates = if (tenBit) config.hevcLevels else listOf(null)
-        val warmup = File(appContext.cacheDir, "warmup.mp4")
-        for (level in candidates) {
+        for (level in config.hevcLevels) {
             val surface = MediaCodec.createPersistentInputSurface()
+            var codec: MediaCodec? = null
             try {
-                buildRecorder(appContext, surface, config, level, 0, null, null, warmup).apply {
-                    try {
-                        prepare()
-                    } finally {
-                        release()
-                    }
-                }
+                codec = Take.createEncoder()
+                codec.configure(Take.encoderFormat(config, tenBit, level), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                codec.setInputSurface(surface)
                 hevcLevel = level
                 recorderSurface = surface
-                Log.i(TAG, "encoder ready: level=$level bitrate=${config.bitrate}")
+                Log.i(TAG, "encoder ready: ${codec.name} level=$level bitrate=${config.bitrate} tenBit=$tenBit")
                 return surface
             } catch (e: Exception) {
                 surface.release()
                 Log.w(TAG, "encoder rejected level=$level", e)
             } finally {
-                warmup.delete()
+                codec?.release()
             }
         }
         if (tenBit) {
@@ -548,6 +556,8 @@ class CameraController(context: Context) {
     }
 
     private fun closeSession() {
+        framePeriodNs = 0.0
+        lastSensorTimestamp = 0L
         stopRecording(drain = false)
         finishTake()
         brightnessLoop.meter(null)
@@ -727,6 +737,7 @@ class CameraController(context: Context) {
             if (request[CaptureRequest.CONTROL_AF_MODE] != CameraMetadata.CONTROL_AF_MODE_OFF) {
                 lastFocusDistance = result[CaptureResult.LENS_FOCUS_DISTANCE]
             }
+            if (s === session) measureFramePeriod(result)
             val iso = result[CaptureResult.SENSOR_SENSITIVITY] ?: return
             val exposureNs = result[CaptureResult.SENSOR_EXPOSURE_TIME] ?: return
             val config = _config.value ?: return
@@ -740,6 +751,18 @@ class CameraController(context: Context) {
             lastExposureUpdate = now
             _exposure.value = Exposure(iso, exposureNs, atLimit = looping && brightnessLoop.atLimit)
         }
+    }
+
+    /** Averages the interval between frames, ignoring gaps (dropped frames) and doubles. */
+    private fun measureFramePeriod(result: TotalCaptureResult) {
+        val ts = result[CaptureResult.SENSOR_TIMESTAMP] ?: return
+        val last = lastSensorTimestamp
+        lastSensorTimestamp = ts
+        if (last == 0L) return
+        val nominal = (_config.value ?: return).frameDurationNs.toDouble()
+        val d = (ts - last).toDouble()
+        if (d < nominal * 0.5 || d > nominal * 1.5) return
+        framePeriodNs = if (framePeriodNs == 0.0) d else framePeriodNs * 0.98 + d * 0.02
     }
 
     /** Time from process start to a live, record-ready preview (adb logcat -s CameraController). */
@@ -773,28 +796,24 @@ class CameraController(context: Context) {
         } else {
             (config.sensorOrientation - displayRotation() + 360) % 360
         }
-        var recorder: MediaRecorder? = null
+        var take: Take? = null
         try {
             val audio = audioInput.choose(_settings.value.mic, _settings.value.micProcessing)
-            // HyperOS hands an UNPROCESSED input to one client only and silences the rest.
-            val exclusive = audio?.audioSource == MediaRecorder.AudioSource.UNPROCESSED
-            if (exclusive) meter.stop(join = true)
-            recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, audio, output.fd.fileDescriptor)
-            try {
-                recorder.prepare()
-                recorder.start()
-            } catch (e: Exception) {
-                // A phone that can't share the mic with the meter still has to record: the take wins.
-                if (audio == null || !meter.running) throw e
-                Log.w(TAG, "recorder failed next to the level meter, retrying without it", e)
-                recorder.release()
-                recorder = null
-                meter.stop(join = true)
-                recorder = buildRecorder(appContext, encoder, config, hevcLevel, hint, audio, output.fd.fileDescriptor)
-                recorder.prepare()
-                recorder.start()
-            }
-            if (audio != null && !meter.running) meter.follow(recorder, audio.channels, handler)
+            // Normally already running for the meter; right out of standby it may be starting.
+            if (audio != null) capture.start(audio)
+            val startNs = System.nanoTime()
+            take = Take(
+                surface = encoder,
+                config = config,
+                tenBit = tenBit,
+                hevcLevel = hevcLevel,
+                profile = colorProfile,
+                rotation = hint,
+                audioSource = if (audio != null) ({ capture.ring }) else null,
+                output = output,
+                measuredFramePeriodNs = framePeriodNs.takeIf { it > 0 }?.toLong(),
+            )
+            take.start(startNs)
             // Feed the encoder only once it runs, otherwise the camera can stall on full buffers.
             startingRecording = true
             try {
@@ -803,14 +822,12 @@ class CameraController(context: Context) {
                 startingRecording = false
             }
         } catch (e: Exception) {
-            if (meter.following) meter.stop()
-            recorder?.release()
+            take?.let { t -> runCatching { t.finish() } }
             output.discard()
             fail("Aufnahme konnte nicht gestartet werden", e)
-            updateMeter()
             return
         }
-        recording = ActiveRecording(recorder, output, fullRange = !tenBit)
+        recording = ActiveRecording(take, output)
         _state.value = CameraState.Recording(formatLabel, SystemClock.elapsedRealtime())
     }
 
@@ -827,7 +844,6 @@ class CameraController(context: Context) {
         recording = null
         val fed = lastSequence
         val replaced = runCatching { setRepeating() }.isSuccess
-        if (meter.following) meter.stop()
         finishing = active
         _state.value = if (session != null) CameraState.Ready(formatLabel) else CameraState.Opening
         if (drain && replaced && fed >= 0) {
@@ -863,17 +879,12 @@ class CameraController(context: Context) {
         }
     }
 
-    /** Finisher thread. Only this thread touches the recorder once it is handed over. */
+    /** Finisher thread. Only this thread touches the take once it is handed over. */
     private fun finalize(active: ActiveRecording) {
-        val stopped = runCatching { active.recorder.stop() }
-            .onFailure { Log.e(TAG, "MediaRecorder.stop failed", it) }
-            .isSuccess
-        active.recorder.release()
-        if (stopped) {
-            if (active.fullRange) {
-                runCatching { FullRange.mark(active.output.fd.fileDescriptor) }
-                    .onFailure { Log.w(TAG, "range tag not fixed", it) }
-            }
+        val usable = runCatching { active.take.finish() }
+            .onFailure { Log.e(TAG, "finishing the take failed", it) }
+            .getOrDefault(false)
+        if (usable) {
             runCatching { active.output.publish() }.onFailure { Log.e(TAG, "publish failed", it) }
         } else {
             runCatching { active.output.discard() }
@@ -892,14 +903,13 @@ class CameraController(context: Context) {
     }
 
     /**
-     * Camera thread. Meters the mic the next recording will use while the camera is open.
-     * Left alone during a take so the recording's input is never touched.
+     * Camera thread. Captures the mic the next recording will use while the camera is open.
+     * Left alone until a take has written its last frame, so its input is never switched.
      */
     private fun updateMeter() {
-        // The mic stays the recorder's until it is stopped.
         if (recording != null || finishing != null || finalizing != null) return
         val s = _settings.value
-        meter.meter(if (wantOpen) audioInput.choose(s.mic, s.micProcessing) else null)
+        capture.start(if (wantOpen) audioInput.choose(s.mic, s.micProcessing) else null)
     }
 
     private fun fail(message: String, cause: Throwable? = null) {

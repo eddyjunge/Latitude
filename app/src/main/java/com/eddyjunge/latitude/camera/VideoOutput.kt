@@ -1,10 +1,13 @@
 package com.eddyjunge.latitude.camera
 
 import android.content.ContentValues
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -13,7 +16,7 @@ import java.util.Locale
 class VideoOutput private constructor(
     private val context: Context,
     private val uri: Uri,
-    /** Read-write: [FullRange] patches the finished file in place. */
+    /** Read-write: [Mp4Writer] rewrites the index in place while recording. */
     val fd: ParcelFileDescriptor,
 ) {
     fun publish() {
@@ -36,10 +39,42 @@ class VideoOutput private constructor(
          */
         const val FOLDER = "Movies/LAT"
 
+        /** Shorter than this, a take cut off by a crash holds no frame worth keeping. */
+        private const val MIN_RECOVERED_BYTES = 1_000_000L
+
         /**
-         * The profile goes into the name: the file is tagged HLG even in Log (MediaRecorder sets
-         * no transfer of its own), so in Resolve the "_LOG" clips get Apple Log assigned by hand.
+         * Takes a crash or a dead battery cut off stay pending, invisible to every app and deleted
+         * by the system after a week. [Mp4Writer] keeps them playable up to the last second, so
+         * they are published here. Call once per process, before anything records.
          */
+        fun recoverPending(context: Context) {
+            val resolver = context.contentResolver
+            val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val args = Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_ONLY)
+                putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, "${MediaStore.Video.Media.RELATIVE_PATH} = ?")
+                putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arrayOf("$FOLDER/"))
+            }
+            val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME)
+            runCatching {
+                resolver.query(collection, projection, args, null)?.use { c ->
+                    while (c.moveToNext()) {
+                        val uri = ContentUris.withAppendedId(collection, c.getLong(0))
+                        // The size column stays 0 until a file is closed properly; ask the file.
+                        // Unknown size: leave it, never delete what can't be checked.
+                        val size = runCatching { resolver.openFileDescriptor(uri, "r")?.use { it.statSize } }.getOrNull() ?: continue
+                        if (size >= MIN_RECOVERED_BYTES) {
+                            resolver.update(uri, ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }, null, null)
+                            Log.i("VideoOutput", "recovered ${c.getString(1)} ($size bytes)")
+                        } else {
+                            resolver.delete(uri, null, null)
+                        }
+                    }
+                }
+            }.onFailure { Log.w("VideoOutput", "recovery failed", it) }
+        }
+
+        /** The profile goes into the name, so takes are told apart at a glance. */
         fun create(context: Context, profile: ColorProfile): VideoOutput {
             val tag = when (profile) {
                 ColorProfile.REC709 -> "709"
