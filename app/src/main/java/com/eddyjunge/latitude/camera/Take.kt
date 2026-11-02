@@ -31,6 +31,14 @@ private const val AUDIO_START_WAIT_MS = 500L
 /** Longest wait for audio the capture hasn't delivered yet; it normally runs well ahead. */
 private const val AUDIO_WAIT_MS = 150L
 
+/**
+ * How much later the microphone's timestamps are than the sound itself. Clap test 2026-11-02,
+ * internal mic, three claps: sound 24–39 ms behind the frames where the hands meet, minus ~3 ms
+ * of sound travel and ~12 ms because the rolling shutter exposes mid-frame rows after the first
+ * one (the frame timestamp). The rest is processing the audio timestamp doesn't account for.
+ */
+private const val AUDIO_LATENCY_NS = 20_000_000L
+
 /** Share of the remaining audio/video offset corrected per frame: settles in about two seconds. */
 private const val SYNC_GAIN = 0.02
 
@@ -248,7 +256,7 @@ class Take(
             w.writeAudio(audioBuffer, 0, n * frameBytes)
             return
         }
-        val target = ring.frameAt(ptsNs)
+        val target = ring.frameAt(ptsNs + AUDIO_LATENCY_NS)
         val nominal = format.sampleRate * sensorPeriodNs / 1e9
         if (sourcePerFrame == 0.0) sourcePerFrame = nominal
         if (!lastTarget.isNaN()) {
