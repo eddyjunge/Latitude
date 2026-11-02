@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="#why-log">Why log</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#how-it-works">How it works</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#smooth">Smooth</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#in-resolve">In Resolve</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#measurements">Measurements</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#build">Build</a>
+  <a href="#why-log">Why log</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#how-it-works">How it works</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#in-resolve">In Resolve</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#measurements">Measurements</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="#build">Build</a>
 </p>
 
 <p align="center">
@@ -54,25 +54,6 @@
     <img src="assets/principles-light.svg" width="100%" alt="Ready on launch: opens with the camera running, the volume buttons start and stop a take. Locked during a take: exposure, white balance and focus don't change while recording. Constant frame rate: 30p, stored as 29.97 like DJI and Sony. No processing look: no sharpening, no LUT, no AI enhancement.">
   </picture>
 </p>
-
-<br>
-
-<h2 align="center" id="smooth">Smooth and light on the phone</h2>
-
-<p align="center">
-  The camera delivers viewfinder frames up to 20 ms early or late, which shows as judder when you pan.<br>
-  Latitude re-times every frame to the sensor’s clock, so the picture moves evenly.<br>
-  It keeps its own work small and turns the camera off when you aren’t filming: the running camera alone draws about 3.7 W.
-</p>
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/smooth-dark.svg">
-    <img src="assets/smooth-light.svg" width="100%" alt="33 milliseconds between viewfinder frames, re-timed to the sensor. After 90 seconds idle the camera switches off. 0.6 seconds from standby to recording, the volume key wakes it up.">
-  </picture>
-</p>
-
-<p align="center"><sub>Frame timing, power and wake-up measured on the Xiaomi 15 Ultra. The camera also closes while you watch clips in the app’s gallery.</sub></p>
 
 <br>
 
