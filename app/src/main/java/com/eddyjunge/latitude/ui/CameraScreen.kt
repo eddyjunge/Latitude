@@ -82,6 +82,7 @@ import com.eddyjunge.latitude.camera.CaptureSettings
 import com.eddyjunge.latitude.camera.ChannelLevel
 import com.eddyjunge.latitude.camera.ColorProfile
 import com.eddyjunge.latitude.camera.Exposure
+import com.eddyjunge.latitude.camera.ExposureTarget
 import com.eddyjunge.latitude.camera.ISO_AUTO
 import com.eddyjunge.latitude.camera.Lens
 import com.eddyjunge.latitude.camera.METER_FLOOR_DB
@@ -362,7 +363,8 @@ private fun TopBar(
                 SHUTTER_180 -> "180°"
                 else -> null
             },
-            warn = exposure?.atLimit == true && settings.shutter == SHUTTER_AUTO,
+            warn = (exposure?.atLimit == true && settings.shutter == SHUTTER_AUTO) ||
+                shutterGaveWay(settings, config, exposure) != 0,
             open = open == Panel.SHUTTER,
             onClick = { onToggle(Panel.SHUTTER) },
         )
@@ -462,15 +464,30 @@ private fun ExposurePicker(
     }
 }
 
+/** Auto ISO hit its minimum, so the shutter got shorter than chosen: -1, otherwise 0. */
+private fun shutterGaveWay(settings: CaptureSettings, config: VideoConfig?, exposure: Exposure?): Int {
+    if (config == null || exposure == null || settings.iso != ISO_AUTO) return 0
+    val chosen = ExposureTarget.of(settings, config).exposureNs ?: return 0
+    val ratio = exposure.exposureNs.toDouble() / chosen
+    return if (ratio < 0.95) -1 else 0
+}
+
 /** The automatic value ran out of range: say why the image is too dark or too bright. */
 private fun limitHint(settings: CaptureSettings, config: VideoConfig?, exposure: Exposure?): String? {
-    if (exposure?.atLimit != true || config == null) return null
+    if (config == null || exposure == null) return null
+    val gaveWay = shutterGaveWay(settings, config, exposure)
+    if (!exposure.atLimit && gaveWay == 0) return null
     return if (settings.iso == ISO_AUTO) {
-        if (exposure.iso >= config.isoRange.upper) "Zu dunkel für diese Verschlusszeit – ISO ist am Maximum"
-        else "Zu hell für diese Verschlusszeit – ISO ist am Minimum (ND-Filter hilft)"
-    } else {
+        when {
+            gaveWay < 0 -> "Viel Licht: kürzer belichtet, damit nichts ausbrennt – ein ND-Filter hält die Verschlusszeit"
+            exposure.iso >= config.isoRange.upper -> "Zu dunkel für diese Verschlusszeit – ISO ist am Maximum"
+            else -> "Zu hell – selbst die kürzeste Verschlusszeit reicht nicht"
+        }
+    } else if (exposure.atLimit) {
         if (exposure.exposureNs >= config.frameDurationNs) "Zu dunkel für diese ISO – Verschlusszeit ist am Maximum"
         else "Zu hell für diese ISO – kürzer geht nicht"
+    } else {
+        null
     }
 }
 

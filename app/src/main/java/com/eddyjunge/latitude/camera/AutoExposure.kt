@@ -106,13 +106,17 @@ internal class BrightnessLoop(private val handler: Handler) {
     /**
      * Sensor values for [target]: the fixed one as chosen, the free one from where the glide
      * is right now. Starts from [seed] (what the sensor did last) so switching modes doesn't jump.
+     *
+     * With a fixed shutter the ISO does the work. Where it runs out in bright light the shutter
+     * gets shorter, because a clipped sky can't be graded back. Not longer in the dark: indoors
+     * any time between 1/60 and 1/30 flickers under 50 Hz light.
      */
     fun resolve(target: ExposureTarget, config: VideoConfig, seed: Exposure?): Pair<Long, Int> {
         val isoRange = config.isoRange
         val nsRange = config.exposureRangeNs
         val maxNs = minOf(nsRange.upper, config.frameDurationNs)
         if (target.exposureNs != null) {
-            lowest = isoRange.lower.toDouble() * target.exposureNs
+            lowest = isoRange.lower.toDouble() * nsRange.lower
             highest = isoRange.upper.toDouble() * target.exposureNs
         } else {
             val iso = (target.iso ?: isoRange.lower).toDouble()
@@ -127,7 +131,11 @@ internal class BrightnessLoop(private val handler: Handler) {
         applied = applied.coerceIn(lowest, highest)
         goal = goal.coerceIn(lowest, highest)
         return if (target.exposureNs != null) {
-            target.exposureNs to (target.iso ?: (applied / target.exposureNs).roundToInt().coerceIn(isoRange.lower, isoRange.upper))
+            if (applied < isoRange.lower.toDouble() * target.exposureNs) {
+                (applied / isoRange.lower).roundToLong().coerceIn(nsRange.lower, target.exposureNs) to isoRange.lower
+            } else {
+                target.exposureNs to (applied / target.exposureNs).roundToInt().coerceIn(isoRange.lower, isoRange.upper)
+            }
         } else {
             val iso = target.iso ?: isoRange.lower
             (applied / iso).roundToLong().coerceIn(nsRange.lower, maxNs) to iso
