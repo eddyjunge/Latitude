@@ -156,7 +156,8 @@ class CameraController(context: Context) {
     /** The request currently repeating, kept so the exposure glide only touches two values. */
     private var repeating: CaptureRequest.Builder? = null
 
-    private class ActiveRecording(val recorder: MediaRecorder, val output: VideoOutput)
+    /** [fullRange]: the 8-bit stream comes full range; MediaRecorder tags every file limited. */
+    private class ActiveRecording(val recorder: MediaRecorder, val output: VideoOutput, val fullRange: Boolean)
 
     /** Sequence id of the latest repeating request; at stop, the last one that fed the encoder. */
     private var lastSequence = -1
@@ -809,7 +810,7 @@ class CameraController(context: Context) {
             updateMeter()
             return
         }
-        recording = ActiveRecording(recorder, output)
+        recording = ActiveRecording(recorder, output, fullRange = !tenBit)
         _state.value = CameraState.Recording(formatLabel, SystemClock.elapsedRealtime())
     }
 
@@ -869,8 +870,10 @@ class CameraController(context: Context) {
             .isSuccess
         active.recorder.release()
         if (stopped) {
-            runCatching { FullRange.mark(active.output.fd.fileDescriptor) }
-                .onFailure { Log.w(TAG, "range tag not fixed", it) }
+            if (active.fullRange) {
+                runCatching { FullRange.mark(active.output.fd.fileDescriptor) }
+                    .onFailure { Log.w(TAG, "range tag not fixed", it) }
+            }
             runCatching { active.output.publish() }.onFailure { Log.e(TAG, "publish failed", it) }
         } else {
             runCatching { active.output.discard() }

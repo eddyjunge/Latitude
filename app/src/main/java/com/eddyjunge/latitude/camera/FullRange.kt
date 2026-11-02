@@ -8,9 +8,13 @@ import java.nio.ByteBuffer
 private const val TAG = "FullRange"
 
 /**
- * The Xiaomi 15 Ultra's ISP hands the encoder full-range YUV (Log's curve top 0.909 lands at
- * code 930 of 1023, dark Rec.709 scenes go down to 0), but MediaRecorder tags every file as
- * limited range. Resolve then stretches 64–940 to 0–1 and the picture gains ~17 % contrast.
+ * The Xiaomi 15 Ultra's ISP hands the encoder full-range YUV in the 8-bit Rec.709 session (our
+ * curve's top 0.932 lands at code 238 of 255, dark scenes go down to 0), but MediaRecorder tags
+ * every file as limited range. Resolve would then stretch 16–235 to 0–1 and add ~17 % contrast.
+ *
+ * Not for 10-bit: the HLG10 session (HLG and Log) delivers limited range like any BT.2100 video
+ * (measured 2026-11-02: every viewfinder level v lands at code 64 + 876·v, Log's top at ~865),
+ * which is what MediaRecorder already says.
  *
  * After recording, the two flags that say "limited" are flipped to "full" in place: the 'colr'
  * box of the video sample entry and video_full_range_flag in the HEVC SPS inside 'hvcC'. Both
