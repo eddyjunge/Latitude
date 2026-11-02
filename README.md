@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>Development prototype.</b> Built for the Xiaomi 15 Ultra. Not yet tested on a device.
+  <b>Development prototype.</b> Built for and tested on the Xiaomi 15 Ultra.
 </p>
 
 <br>
@@ -72,7 +72,8 @@
 <p align="center">
   <b>Working today:</b> instant-start pipeline, volume-button recording, AE · AWB · AF lock,<br>
   open gate 4096×3072 HEVC 10-bit at 150 Mbit/s, Apple Log · HLG · Rec.709, matched colors on every lens,<br>
-  24-bit PCM sound (Resolve on Linux decodes no AAC), crash-safe files, zebras, thermal warning.
+  24-bit PCM sound (Resolve on Linux decodes no AAC), crash-safe files, zebras, thermal warning,<br>
+  time-of-day timecode, lens · ISO · shutter angle · white balance in Resolve's metadata panel.
 </p>
 
 <br>

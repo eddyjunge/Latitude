@@ -811,6 +811,13 @@ class CameraController(context: Context) {
                 rotation = hint,
                 audioSource = if (audio != null) ({ capture.ring }) else null,
                 output = output,
+                shot = ShotInfo(
+                    lens = config.lens,
+                    iso = _exposure.value?.iso,
+                    exposureNs = _exposure.value?.exposureNs,
+                    // Rounded like a camera dial; only when the picture is rendered with our own white.
+                    kelvin = white?.takeIf { matched }?.let { (it.cct / 50).roundToInt() * 50 },
+                ),
                 measuredFramePeriodNs = framePeriodNs.takeIf { it > 0 }?.toLong(),
             )
             take.start(startNs)

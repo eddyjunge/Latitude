@@ -23,11 +23,21 @@ data class Lens(
     val physicalId: String?,
     val equivalentMm: Int,
     val front: Boolean,
+    /** f-number; phone lenses have one fixed aperture. */
+    val aperture: Float?,
 ) {
     /** The characteristics of the lens itself (physical camera if bound, else the opened one). */
     val characteristicsId: String get() = physicalId ?: openId
 
     val label: String get() = if (front) "FRONT" else "${equivalentMm}mm"
+
+    /** How the lens is named in the clip's metadata, e.g. "23mm f/1.63" or "Front 21mm f/2.0". */
+    val description: String
+        get() = buildString {
+            if (front) append("Front ")
+            append("${equivalentMm}mm")
+            aperture?.let { append(" f/").append(fNumber(it)) }
+        }
 
     companion object {
         /** Back lenses sorted wide to tele, then front cameras. */
@@ -44,11 +54,11 @@ data class Lens(
                     emptyList()
                 }
                 if (physical.isEmpty()) {
-                    lenses += Lens("cam$id", id, null, equivalentMm(chars), front)
+                    lenses += Lens("cam$id", id, null, equivalentMm(chars), front, aperture(chars))
                 } else {
                     physical.forEach { pid ->
                         val pchars = manager.getCameraCharacteristics(pid)
-                        lenses += Lens("cam$id/$pid", id, pid, equivalentMm(pchars), front)
+                        lenses += Lens("cam$id/$pid", id, pid, equivalentMm(pchars), front, aperture(pchars))
                     }
                 }
             }
@@ -57,6 +67,13 @@ data class Lens(
             return lenses.distinctBy { it.front to it.equivalentMm }
                 .sortedWith(compareBy({ it.front }, { it.equivalentMm }))
         }
+
+        private fun aperture(chars: CameraCharacteristics): Float? =
+            chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull()
+
+        /** "1.63", "2.2", "2.0": two decimals at most, one at least. */
+        fun fNumber(f: Float): String =
+            "%.2f".format(java.util.Locale.ROOT, f).trimEnd('0').let { if (it.endsWith('.')) it + "0" else it }
 
         private fun equivalentMm(chars: CameraCharacteristics): Int {
             val focal = chars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: return 0

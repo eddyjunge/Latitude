@@ -19,6 +19,12 @@ class VideoTrackFormat(
     val hvcC: ByteArray,
 )
 
+/**
+ * Start timecode: frame [frame] counted at [framesPerSecond] (non-drop), e.g. the time of day
+ * the first frame was exposed.
+ */
+class Timecode(val frame: Long, val framesPerSecond: Int)
+
 /** Little-endian integer PCM, interleaved. */
 class AudioTrackFormat(val sampleRate: Int, val channels: Int, val bitsPerSample: Int) {
     val bytesPerFrame: Int get() = channels * bitsPerSample / 8
@@ -29,7 +35,8 @@ class AudioTrackFormat(val sampleRate: Int, val channels: Int, val bitsPerSample
  * DaVinci Resolve needs and MediaRecorder can't give:
  * - constant frame rate: every frame lasts exactly one frame period (a single 'stts' entry);
  * - exact color tags and QuickTime metadata keys, e.g. the one that makes Resolve pick Apple Log;
- * - 24-bit PCM as 'ipcm'. Resolve on Linux decodes no AAC at all.
+ * - 24-bit PCM as 'ipcm'. Resolve on Linux decodes no AAC at all;
+ * - a start timecode ('tmcd' track, laid out like FFmpeg writes it), which Resolve reads from MP4.
  *
  * Crash safe: 'moov' sits in space reserved right after 'ftyp' and is rewritten with the size of
  * 'mdat' at every [checkpoint], so a take cut short by a crash still opens up to that point.
@@ -42,6 +49,7 @@ class Mp4Writer(
     private val video: VideoTrackFormat,
     private val audio: AudioTrackFormat?,
     private val metadata: List<Pair<String, String>>,
+    private val timecode: Timecode? = null,
 ) {
     private val channel: FileChannel = FileOutputStream(fd).channel
     private val creationTime = System.currentTimeMillis() / 1000 + SECONDS_1904_TO_1970
@@ -56,6 +64,10 @@ class Mp4Writer(
     private val audioOffsets = LongList()
     private val audioChunkFrames = IntList()
     private var audioFrames = 0L
+    private var timecodeOffset = 0L
+
+    private val audioTrackId = 2
+    private val timecodeTrackId = if (audio != null) 3 else 2
 
     /** The moov outgrew the reserved space; the final one goes to the end of the file. */
     private var overflowed = false
@@ -73,6 +85,12 @@ class Mp4Writer(
         mdatStart = ftypEnd + RESERVED_BYTES
         writeFree(ftypEnd, RESERVED_BYTES)
         pos = mdatStart + MDAT_HEADER
+        if (timecode != null) {
+            // The one timecode sample: the frame number the take starts at.
+            timecodeOffset = pos
+            write(ByteBuffer.allocate(4).apply { putInt(timecode.frame.toInt()); flip() }, pos)
+            pos += 4
+        }
         writeMdatHeader()
     }
 
@@ -164,6 +182,7 @@ class Mp4Writer(
             mvhd(movieDurationMs)
             videoTrak(videoDuration * 1000 / videoTimescale, videoTimescale, videoDuration, frameTicks)
             audio?.let { audioTrak(it, audioFrames * 1000 / it.sampleRate) }
+            timecode?.let { timecodeTrak(it, videoDuration * 1000 / videoTimescale, videoTimescale, videoDuration, frameTicks) }
             if (metadata.isNotEmpty()) meta()
             end()
         }.toBuffer()
@@ -179,13 +198,13 @@ class Mp4Writer(
         zeros(10)
         matrix(0)
         zeros(24)
-        u32(if (audio != null) 3L else 2L) // next track id
+        u32(timecodeTrackId + if (timecode != null) 1L else 0L) // next track id
         end()
     }
 
-    private fun BoxWriter.tkhd(trackId: Int, durationMs: Long, isAudio: Boolean) {
+    private fun BoxWriter.tkhd(trackId: Int, durationMs: Long, isAudio: Boolean, enabled: Boolean = true) {
         begin("tkhd")
-        u32(0x00000003) // version 0, enabled + in movie
+        u32(if (enabled) 0x00000003 else 0x00000002) // version 0, (enabled +) in movie
         u32(creationTime); u32(creationTime)
         u32(trackId.toLong()); u32(0)
         u32(durationMs)
@@ -228,6 +247,9 @@ class Mp4Writer(
     private fun BoxWriter.videoTrak(durationMs: Long, timescale: Long, duration: Long, frameTicks: Long) {
         begin("trak")
         tkhd(1, durationMs, isAudio = false)
+        if (timecode != null) {
+            begin("tref"); begin("tmcd"); u32(timecodeTrackId.toLong()); end(); end()
+        }
         begin("mdia")
         mdhd(timescale, duration)
         hdlr("vide", "VideoHandler")
@@ -281,7 +303,7 @@ class Mp4Writer(
 
     private fun BoxWriter.audioTrak(format: AudioTrackFormat, durationMs: Long) {
         begin("trak")
-        tkhd(2, durationMs, isAudio = true)
+        tkhd(audioTrackId, durationMs, isAudio = true)
         begin("mdia")
         mdhd(format.sampleRate.toLong(), audioFrames)
         hdlr("soun", "SoundHandler")
@@ -300,6 +322,36 @@ class Mp4Writer(
         end()
         stscRuns(audioChunkFrames)
         co64(audioOffsets)
+        end() // stbl
+        end() // minf
+        end() // mdia
+        end() // trak
+    }
+
+    private fun BoxWriter.timecodeTrak(tc: Timecode, durationMs: Long, timescale: Long, duration: Long, frameTicks: Long) {
+        begin("trak")
+        tkhd(timecodeTrackId, durationMs, isAudio = false, enabled = false)
+        begin("mdia")
+        mdhd(timescale, duration)
+        hdlr("tmcd", "TimeCodeHandler")
+        begin("minf")
+        begin("nmhd"); u32(0); end()
+        dinf()
+        begin("stbl")
+        begin("stsd"); u32(0); u32(1)
+        begin("tmcd")
+        zeros(6); u16(1) // reserved, data reference index
+        u32(0) // reserved
+        u32(0) // flags: non-drop, no 24 h wrap, no negatives
+        u32(timescale); u32(frameTicks)
+        u8(tc.framesPerSecond); u8(0)
+        end()
+        end()
+        // One sample spanning the whole take.
+        begin("stts"); u32(0); u32(1); u32(1); u32(maxOf(duration, 1)); end()
+        begin("stsz"); u32(0); u32(4); u32(1); end()
+        begin("stsc"); u32(0); u32(1); u32(1); u32(1); u32(1); end()
+        begin("co64"); u32(0); u32(1); u64(timecodeOffset); end()
         end() // stbl
         end() // minf
         end() // mdia

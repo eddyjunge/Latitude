@@ -12,6 +12,8 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
+import java.time.Instant
+import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
@@ -42,6 +44,15 @@ private const val AUDIO_LATENCY_NS = 20_000_000L
 /** Share of the remaining audio/video offset corrected per frame: settles in about two seconds. */
 private const val SYNC_GAIN = 0.02
 
+/** What the camera was set to when the take started, for the clip's metadata in Resolve. */
+data class ShotInfo(
+    val lens: Lens,
+    val iso: Int?,
+    val exposureNs: Long?,
+    /** White point the picture is rendered with; null when the camera's own AWB decides. */
+    val kelvin: Int?,
+)
+
 /**
  * One recording: the camera renders into the persistent [surface], the hardware HEVC encoder
  * compresses, and [Mp4Writer] writes video plus the matching slice of [audio] for every frame.
@@ -64,6 +75,7 @@ class Take(
     /** Where to get the microphone's audio; null records without sound. */
     private val audioSource: (() -> AudioRing?)?,
     private val output: VideoOutput,
+    private val shot: ShotInfo,
     /** Interval between frames measured from the sensor's timestamps; the first guess for the audio. */
     measuredFramePeriodNs: Long?,
 ) {
@@ -204,7 +216,7 @@ class Take(
             if (!key) return
             val record = hvcC ?: throw IllegalStateException("frame before codec config")
             audio = awaitAudio()
-            w = Mp4Writer(output.fd.fileDescriptor, trackFormat(record), audio?.format, metadata())
+            w = Mp4Writer(output.fd.fileDescriptor, trackFormat(record), audio?.format, metadata(), timeOfDay(ptsNs))
             writer = w
             Log.i(TAG, "first frame ${(ptsNs - startNs) / 1_000_000} ms after start; file $timescale/$frameTicks, sensor %.3f ms".format(sensorPeriodNs / 1e6))
         } else {
@@ -332,12 +344,39 @@ class Take(
         hvcC = record,
     )
 
+    /**
+     * Start timecode = time of day the first frame was exposed, like Sony and DJI cameras run it.
+     * Counted non-drop at the nominal rate, which is what Resolve does for 29.97 too.
+     */
+    private fun timeOfDay(ptsNs: Long): Timecode {
+        // The frame's timestamp is CLOCK_MONOTONIC (see start()); turn it into wall-clock time.
+        val wallMs = System.currentTimeMillis() - (System.nanoTime() - ptsNs) / 1_000_000
+        val local = Instant.ofEpochMilli(wallMs).atZone(ZoneId.systemDefault())
+        val ms = local.toLocalTime().toNanoOfDay() / 1_000_000
+        return Timecode(frame = ms * config.fps / 1000, framesPerSecond = config.fps)
+    }
+
+    /**
+     * QuickTime metadata keys Resolve 21.1 shows in its metadata panel (each one checked on import):
+     * Apple's for the camera and the Log curve, the Blackmagic Camera app's for lens and exposure.
+     */
     private fun metadata(): List<Pair<String, String>> = buildList {
-        // Makes Resolve pick "Apple Log" as input color space on import (measured on Resolve 21.1).
+        // Makes Resolve pick "Apple Log" as input color space on import.
         if (profile == ColorProfile.LOG) add("com.apple.proapps.customgamma" to "com.apple.rec2020.apple-log")
-        add("com.apple.quicktime.make" to Build.MANUFACTURER)
-        add("com.apple.quicktime.model" to Build.MODEL)
-        add("com.apple.quicktime.software" to "Latitude")
+        add("com.apple.quicktime.make" to Build.MANUFACTURER) // Camera Manufacturer
+        add("com.apple.quicktime.model" to Build.MODEL) // Camera Type
+        add("com.apple.quicktime.software" to "Latitude") // Camera Firmware
+        val bmd = "com.blackmagic-design.camera."
+        add(bmd + "lensType" to shot.lens.description) // Lens Type
+        // Focal Point (mm): the 35mm equivalent, the number the user picks the lens by.
+        add(bmd + "lensFocalLength" to shot.lens.equivalentMm.toString())
+        shot.lens.aperture?.let { add(bmd + "aperture" to "f/" + Lens.fNumber(it)) } // Camera Aperture
+        shot.iso?.let { add(bmd + "iso" to it.toString()) } // ISO
+        shot.exposureNs?.let { // Shutter Angle
+            val angle = it * 360.0 / config.frameDurationNs
+            add(bmd + "shutterAngle" to "%.1f".format(java.util.Locale.ROOT, angle).removeSuffix(".0"))
+        }
+        shot.kelvin?.let { add(bmd + "whiteBalanceKelvin" to it.toString()) } // White Point (Kelvin)
     }
 
     companion object {
